@@ -1,0 +1,42 @@
+# Keil MDK
+*.uvoptx
+*.uvguix.*
+*.uvprojx.bak
+*.uvoptx.bak
+*.txt.bak
+*.lst
+*.obj
+*.o
+*.d
+*.crf
+*.htm
+*.dep
+*.lnp
+*.sct
+*.map
+*.axf
+*.__i
+*.build_log.htm
+*.uvgui.*
+*.uvguix
+
+# Output folders
+Objects/
+Listings/
+DebugConfig/
+RTE/
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*.~*
+
+# VS Code / Claude / System
+.vscode/
+.claude/
+.history/
+node_modules/
+Thumbs.db
+Desktop.ini
+.DS_Store
