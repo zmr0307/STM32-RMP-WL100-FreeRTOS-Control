@@ -14,7 +14,6 @@
 #include "./SYSTEM/usart/usart.h"
 #include "./BSP/LED/led.h"
 #include "./BSP/LCD/lcd.h"
-#include "./BSP/CAN/can.h"
 #include "./BSP/CHASSIS/chassis_driver.h"
 
 /* FreeRTOS headers */
@@ -102,10 +101,10 @@ void chassis_test_demo(void)
     printf("Chassis Driver Test Program Start\r\n");
     printf("========================================\r\n");
 
-    /* ① 初始化底盘驱动（回环测试模式） */
-    if (chassis_driver_init(1) == CHASSIS_OK)
+    /* ① 初始化底盘驱动（0 = 开启正常 CAN 模式连接实车，不再回环） */
+    if (chassis_driver_init(0) == CHASSIS_OK)
     {
-        printf("[Init] Chassis driver init success (loopback mode)\r\n");
+        printf("[Init] Chassis driver init success (NORMAL mode)\r\n");
     }
     else
     {
@@ -177,119 +176,120 @@ void start_task(void *pvParameters)
 }
 
 /**
- * @brief  底盘控制测试任务
- * @note   测试流程：
- *         1. 发送控制使能（0x400）
- *         2. 发送运动模式（0x401）
- *         3. 发送运动控制（0x402）
- *         4. 循环发送不同速度指令
+ * @brief  底盘安全全向首飞微操测试任务
+ * @note   利用底座内置 0x402 全向平滑算法，测试机器人的运动控制：
+ *         1. 切入自旋模式 0x04
+ *         2. 状态交替：停稳 5秒 -> 逆时针自转 2秒 -> 永久安全停车
+ *         不会改变 LCD 刷屏任务。
  */
 void chassis_ctrl_task(void *pvParameters)
 {
-    chassis_motion_ctrl_t ctrl;
     chassis_err_e ret;
-    uint8_t test_step = 0;
+    chassis_motion_ctrl_t motion_cmd;
 
-    printf("\r\n>>> Chassis Control Test Task Start\r\n");
+    uint8_t state_step = 0;   /* 0: 静止等待, 1: 侧向微滑 */
+    uint16_t timer_100ms = 0; /* 100ms计次定时器 */
+
+    printf("\r\n>>> Chassis OMNI-DIRECTIONAL Safe Test Task Start <<<\r\n");
 
     vTaskDelay(1000);  /* Wait 1s for system stable */
 
     /* ========== Test1: Send control enable ========== */
-    printf("\r\n[Test1] Send control enable message (0x400)\r\n");
     ret = chassis_send_ctrl_enable(CTRL_MODE_CAN);
     if (ret == CHASSIS_OK)
     {
-        printf("[Test1] OK Control enable sent\r\n");
         lcd_show_string(10, 130, 220, 16, 16, "Enable: OK  ", GREEN);
     }
     else
     {
-        printf("[Test1] FAIL Control enable send failed\r\n");
         lcd_show_string(10, 130, 220, 16, 16, "Enable: FAIL", RED);
     }
 
     vTaskDelay(500);
 
-    /* ========== Test2: Send motion mode ========== */
-    printf("\r\n[Test2] Send motion mode message (0x401)\r\n");
-    ret = chassis_send_motion_mode(MOTION_MODE_FORWARD);
+    /* ========== Test2: Send SPIN Mode (自旋模式，交由原厂内部做平滑处理) ========== */
+    printf("\r\n[Test2] Requesting SPIN Control Mode (0x04)...\r\n");
+    /* 发送自带的原地打转模式 */
+    ret = chassis_send_motion_mode(MOTION_MODE_SPIN); 
     if (ret == CHASSIS_OK)
     {
-        printf("[Test2] OK Motion mode sent (Ackermann forward)\r\n");
-        lcd_show_string(10, 150, 220, 16, 16, "Mode: OK    ", GREEN);
-    }
-    else
-    {
-        printf("[Test2] FAIL Motion mode send failed\r\n");
-        lcd_show_string(10, 150, 220, 16, 16, "Mode: FAIL  ", RED);
+        /* 借用以前LCD字符占位免得LCD闪烁 */
+        lcd_show_string(10, 150, 220, 16, 16, "Mode: SPIN  ", BLUE); 
     }
 
     vTaskDelay(500);
 
-    /* ========== Test3: Loop send motion control commands ========== */
-    printf("\r\n[Test3] Start loop sending motion control commands (0x402)\r\n");
+    /* ========== Test3: OMNI Safe Loop (100ms周期循环) ========== */
+    printf("\r\n[Test3] Starting SPIN Test (Stop 5s, CCW 2s, Stop Forever)\r\n");
 
     while (1)
     {
-        switch (test_step)
+        float target_vx = 0.0f;
+        float target_vy = 0.0f;
+        float target_vz = 0.0f;
+
+        /* 简易安全状态机 */
+        if (state_step == 0)
         {
-            case 0:  /* Forward 0.5m/s */
-                ctrl.vx = 0.5f;
-                ctrl.vy = 0.0f;
-                ctrl.vz = 0.0f;
-                printf("\r\n[Ctrl] Forward: vx=0.5m/s, vy=0, vz=0\r\n");
-                break;
+            /* 状态 0：绝对静止期 (5秒 = 50 * 100ms) */
+            target_vx = 0.0f;
+            target_vy = 0.0f;
+            target_vz = 0.0f;
+            
+            if (timer_100ms == 0) printf("\r\n[SAFE STOP] Wheels aligning to 0, holding for 5s...");
+            lcd_show_string(10, 170, 220, 16, 16, "Ctrl: STOP  ", BLUE);
 
-            case 1:  /* Backward -0.3m/s */
-                ctrl.vx = -0.3f;
-                ctrl.vy = 0.0f;
-                ctrl.vz = 0.0f;
-                printf("\r\n[Ctrl] Backward: vx=-0.3m/s, vy=0, vz=0\r\n");
-                break;
+            timer_100ms++;
+            if (timer_100ms >= 50) 
+            {
+                state_step = 1;
+                timer_100ms = 0;
+            }
+        }
+        else if (state_step == 1)
+        {
+            /* 状态 1：原地陀螺缓慢自转期 (2秒 = 20 * 100ms, 逆时针恢复) */
+            target_vx = 0.0f;  
+            target_vy = 0.0f; 
+            target_vz = 0.2f; /* 自转反向恢复：逆时针旋转，+0.2 弧度/秒 */
+            
+            if (timer_100ms == 0) printf("\r\n[SPIN] Spinning CCW (Positive Z) at +0.2 rad/s for 2s...");
+            lcd_show_string(10, 170, 220, 16, 16, "Ctrl: CCW   ", MAGENTA);
 
-            case 2:  /* Turn left 0.5rad/s */
-                ctrl.vx = 0.0f;
-                ctrl.vy = 0.0f;
-                ctrl.vz = 0.5f;
-                printf("\r\n[Ctrl] Turn left: vx=0, vy=0, vz=0.5rad/s\r\n");
-                break;
-
-            case 3:  /* Turn right -0.5rad/s */
-                ctrl.vx = 0.0f;
-                ctrl.vy = 0.0f;
-                ctrl.vz = -0.5f;
-                printf("\r\n[Ctrl] Turn right: vx=0, vy=0, vz=-0.5rad/s\r\n");
-                break;
-
-            case 4:  /* Stop */
-                ctrl.vx = 0.0f;
-                ctrl.vy = 0.0f;
-                ctrl.vz = 0.0f;
-                printf("\r\n[Ctrl] Stop: vx=0, vy=0, vz=0\r\n");
-                break;
+            timer_100ms++;
+            if (timer_100ms >= 20) 
+            {
+                /* 执行完2秒恢复自传后，斩断循环，进入永久停机状态 */
+                state_step = 2; 
+                timer_100ms = 0;
+            }
+        }
+        else if (state_step == 2)
+        {
+            /* 状态 2：永久静止期 (测试结束保活) */
+            target_vx = 0.0f;
+            target_vy = 0.0f;
+            target_vz = 0.0f;
+            
+            if (timer_100ms == 0) printf("\r\n[TEST DONE] Test sequence finished. Holding 0 speed forever.");
+            lcd_show_string(10, 170, 220, 16, 16, "Ctrl: FINISH", BLUE);
         }
 
-        /* 发送控制指令 */
-        ret = chassis_send_motion_ctrl(&ctrl);
-        if (ret == CHASSIS_OK)
+        /* 1. 不再调用手写的矩阵！直接将 Vz 塞给官方 0x402 骨架 */
+        motion_cmd.vx = target_vx;
+        motion_cmd.vy = target_vy;
+        motion_cmd.vz = target_vz;
+
+        /* 3. 使用底盘内部的全向平滑避磨损算法处理 */
+        chassis_err_e err = chassis_send_motion_ctrl(&motion_cmd);
+
+        if (err != CHASSIS_OK)
         {
-            printf("[Ctrl] OK Motion control sent\r\n");
-            lcd_show_string(10, 170, 220, 16, 16, "Ctrl: OK    ", BLUE);
-        }
-        else
-        {
-            printf("[Ctrl] FAIL Motion control send failed\r\n");
-            lcd_show_string(10, 170, 220, 16, 16, "Ctrl: FAIL  ", RED);
+            lcd_show_string(10, 170, 220, 16, 16, "Ctrl: CANERR", RED);
         }
 
-        /* 切换到下一个测试步骤 */
-        test_step++;
-        if (test_step > 4)
-        {
-            test_step = 0;
-        }
-
-        vTaskDelay(3000);  /* 每3秒发送一次 */
+        /* 必须维持在 100ms 的精确发包心跳 */
+        vTaskDelay(100);  
     }
 }
 
@@ -312,14 +312,9 @@ void chassis_rx_task(void *pvParameters)
 
         if (ret == pdTRUE)
         {
-            /* 打印接收到的原始CAN数据 */
-            printf("[RX] ID=0x%03X, Len=%d, Data: %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
-                    rx_data.id,
-                    rx_data.len,
-                    rx_data.data[0], rx_data.data[1], rx_data.data[2], rx_data.data[3],
-                    rx_data.data[4], rx_data.data[5], rx_data.data[6], rx_data.data[7]);
+            /* 为避免刷屏干扰仪表盘，屏蔽接收到的原始十六进制数据 printf */
 
-            /* 调用底盘驱动处理函数（解码） */
+            /* 调用底盘驱动处理函数（解码暂存至全局 state） */
             chassis_process_feedback(rx_data.id, rx_data.data, rx_data.len);
 
             /* 获取底盘状态 */
@@ -328,74 +323,71 @@ void chassis_rx_task(void *pvParameters)
             /* 根据ID打印解码后的数据 */
             switch (rx_data.id)
             {
-                case CAN_ID_SYSTEM_STATUS:  /* 0x100 系统状态 */
-                    printf("[Decode] System status: Voltage=%dmV, Current=%dmA, SOC=%d%%, State=%d\r\n",
-                            state->system_status.battery_voltage * 10,  /* 10mV -> mV */
-                            state->system_status.battery_current * 10,  /* 10mA -> mA */
-                            state->system_status.soc,
-                            state->system_status.system_state);
-                    break;
-
-                case CAN_ID_WHEEL_SPEED:    /* 0x101 轮速 */
-                    printf("[Decode] Wheel speed: W1=%d, W2=%d, W3=%d, W4=%d\r\n",
-                            state->wheel_speed.wheel1_speed,
-                            state->wheel_speed.wheel2_speed,
-                            state->wheel_speed.wheel3_speed,
-                            state->wheel_speed.wheel4_speed);
-                    break;
-
-                case CAN_ID_WHEEL_ANGLE:    /* 0x102 轮角 */
-                    printf("[Decode] Wheel angle: W1=%d, W2=%d, W3=%d, W4=%d\r\n",
-                            state->wheel_angle.wheel1_angle,
-                            state->wheel_angle.wheel2_angle,
-                            state->wheel_angle.wheel3_angle,
-                            state->wheel_angle.wheel4_angle);
-                    break;
-
-                case CAN_ID_MOTION_FEEDBACK: /* 0x104 运动反馈 */
-                    printf("[Decode] Motion feedback: vx=%d, vy=%d, vz=%d\r\n",
-                            state->motion_feedback.vx_fb,
-                            state->motion_feedback.vy_fb,
-                            state->motion_feedback.vz_fb);
-                    break;
-
-                case CAN_ID_CTRL_ENABLE:     /* 0x400 控制使能（回环收到自己发的） */
-                    printf("[Loopback] Received control enable message (self-sent)\r\n");
-                    break;
-
-                case CAN_ID_MOTION_MODE:     /* 0x401 运动模式（回环收到自己发的） */
-                    printf("[Loopback] Received motion mode message (self-sent)\r\n");
-                    break;
-
-                case CAN_ID_MOTION_CTRL:     /* 0x402 Motion control (loopback received self-sent) */
-                    printf("[Loopback] Received motion control message (self-sent)\r\n");
-
-                    /* Simulate chassis feedback in loopback mode */
+                case CAN_ID_SYSTEM_STATUS:  /* 借用 0x100 每 1000ms才触发一次的特性，实现整洁看板打印与LCD刷屏 */
                     {
-                        CAN_RxData_t feedback;
-                        feedback.id = CAN_ID_SYSTEM_STATUS;  /* 0x100 System status */
-                        feedback.len = 8;
-                        /* 构造模拟的0x100反馈包 */
-                        feedback.data[0] = 0x00;  /* Byte[0]: System state (0: normal) */
-                        feedback.data[1] = 0x01;  /* Byte[1]: Ctrl mode (1: CAN code) */
-                        feedback.data[2] = 0x00;  /* Byte[2]: Peripheral (0: clear) */
-                        feedback.data[3] = 80;    /* Byte[3]: SOC 80% */
+                        char lcd_buf[50];
                         
-                        /* Voltage: 48V = 48000mV = 4800 * 10mV, 0x12C0 */
-                        feedback.data[4] = 0x12;  /* Byte[4]: Voltage high byte */
-                        feedback.data[5] = 0xC0;  /* Byte[5]: Voltage low byte */
+                        /* 1. 串口打印 */
+                        printf("\r\n--- CHASSIS STATUS DASHBOARD ---\r\n");
+                        printf("Voltage : %5dmV | Current: %5dmA | SOC: %3d%%\r\n",
+                                state->system_status.battery_voltage * 10,
+                                state->system_status.battery_current * 10,
+                                state->system_status.soc);
+                        printf("State   : %d       | Periph : 0x%02X   | Mode: %d\r\n",
+                                state->system_status.system_state,
+                                state->system_status.peripheral_state,
+                                state->system_status.ctrl_mode);
+                        printf("Speed(mm/s): W1=%d, W2=%d, W3=%d, W4=%d\r\n",
+                                state->wheel_speed.wheel1_speed,
+                                state->wheel_speed.wheel2_speed,
+                                state->wheel_speed.wheel3_speed,
+                                state->wheel_speed.wheel4_speed);
+                        printf("Angle(deg) : FL=%.2f, RL=%.2f, FR=%.2f, RR=%.2f\r\n",
+                                state->wheel_angle.wheel1_angle * 0.01f,
+                                state->wheel_angle.wheel2_angle * 0.01f,
+                                state->wheel_angle.wheel3_angle * 0.01f,
+                                state->wheel_angle.wheel4_angle * 0.01f);
+                        printf("--------------------------------\r\n");
                         
-                        /* Current: 放电3A = 3000mA = 300 * 10mA, 0x012C */
-                        feedback.data[6] = 0x01;  /* Byte[6]: Current high byte */
-                        feedback.data[7] = 0x2C;  /* Byte[7]: Current low byte */
-
-                        /* Send simulated feedback to queue */
-                        xQueueSend(g_can_rx_queue, &feedback, 0);
+                        /* 2. LCD 屏幕显示刷新 (坐标 10, 210 往下排列) */
+                        sprintf(lcd_buf, "BAT:%.1fV %02d%% %5dmA", 
+                                state->system_status.battery_voltage * 10 / 1000.0f, 
+                                state->system_status.soc,
+                                state->system_status.battery_current * 10);
+                        lcd_show_string(10, 210, 240, 16, 16, lcd_buf, BLUE);
+                        
+                        sprintf(lcd_buf, "Spd: %4d %4d %4d %4d", 
+                                state->wheel_speed.wheel1_speed, state->wheel_speed.wheel2_speed,
+                                state->wheel_speed.wheel3_speed, state->wheel_speed.wheel4_speed);
+                        lcd_show_string(10, 230, 240, 16, 16, lcd_buf, MAGENTA);
+                        
+                        sprintf(lcd_buf, "Ang: %3d  %3d  %3d  %3d", 
+                                (int)(state->wheel_angle.wheel1_angle * 0.01f), (int)(state->wheel_angle.wheel2_angle * 0.01f),
+                                (int)(state->wheel_angle.wheel3_angle * 0.01f), (int)(state->wheel_angle.wheel4_angle * 0.01f));
+                        lcd_show_string(10, 250, 240, 16, 16, lcd_buf, MAGENTA);
                     }
                     break;
 
+                case CAN_ID_WHEEL_SPEED:    /* 0x101 轮速 (30ms级, 屏蔽单行打印以防刷屏) */
+                    break;
+
+                case CAN_ID_WHEEL_ANGLE:    /* 0x102 轮角 (30ms级, 屏蔽单行打印以防刷屏) */
+                    break;
+
+                case CAN_ID_FAULT_FEEDBACK:  /* 0x103 故障包 (1000ms级, 屏蔽以防干扰仪表盘) */
+                    break;
+
+                case CAN_ID_MOTION_FEEDBACK: /* 0x104 运动反馈 (20ms级, 屏蔽单行打印以防刷屏) */
+                    break;
+
+                case CAN_ID_CTRL_ENABLE:     
+                case CAN_ID_MOTION_MODE:     
+                case CAN_ID_MOTION_CTRL:     
+                    /* 屏蔽回环或其它无用打印 */
+                    break;
+
                 default:
-                    printf("[RX] Unknown ID: 0x%03X\r\n", rx_data.id);
+                    /* printf("[RX] Unknown ID: 0x%03X\r\n", rx_data.id); */
                     break;
             }
 

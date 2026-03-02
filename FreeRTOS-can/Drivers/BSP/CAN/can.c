@@ -48,8 +48,8 @@ static QueueHandle_t g_can_rx_queue_handle = NULL;
  *              CAN挂在APB1上, 其输入时钟频率为 Fpclk1 = PCLK1 = 42Mhz
  *              tq     = brp * tpclk1;
  *              波特率 = Fpclk1 / ((tbs1 + tbs2 + 1) * brp);
- *              我们设置 can_init(1, 6, 7, 6, 1), 则CAN波特率为:
- *              42M / ((6 + 7 + 1) * 6) = 500Kbps
+ *              我们设置 can_init(1, 5, 8, 6, 1), 则CAN波特率为:
+ *              42M / ((5 + 8 + 1) * 6) = 500Kbps
  *
  * @param       mode    : CAN_MODE_NORMAL,  普通模式;
                           CAN_MODE_LOOPBACK,回环模式;
@@ -193,7 +193,7 @@ void CAN1_RX0_IRQHandler(void)
  */
 uint8_t can_send_msg(uint32_t id, uint8_t *msg, uint8_t len)
 {
-    uint16_t t = 0;
+    uint32_t t = 0;
     uint32_t TxMailbox = CAN_TX_MAILBOX0;
 
     g_canx_txheader.StdId = id;         /* 标准标识符 */
@@ -211,7 +211,10 @@ uint8_t can_send_msg(uint32_t id, uint8_t *msg, uint8_t len)
     {
         t++;
 
-        if (t > 0xFFF)
+        /* 修复原子的BUG: t>0xFFF 极度过短(168MHz下仅需几百微秒), 
+           甚至无法覆盖一个由于被其它高优先帧挤占后的标准 CAN 帧传送时间! 
+           现将其加大成 0x7FFFF 对待 */
+        if (t > 0x7FFFF)
         {
             HAL_CAN_AbortTxRequest(&g_canx_handler, TxMailbox);     /* 超时则直接中止待发的发送请求 */
             return 1;

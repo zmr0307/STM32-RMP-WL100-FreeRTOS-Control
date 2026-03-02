@@ -60,6 +60,8 @@ chassis_err_e chassis_send_ctrl_enable(chassis_ctrl_mode_e mode);
 chassis_err_e chassis_send_motion_mode(chassis_motion_mode_e mode);
 chassis_err_e chassis_send_motion_ctrl(chassis_motion_ctrl_t *ctrl);
 
+
+
 /* 反馈消息处理 */
 void chassis_process_feedback(uint32_t can_id, uint8_t *data, uint8_t len);
 

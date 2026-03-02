@@ -29,6 +29,7 @@ static void encode_ctrl_enable(chassis_ctrl_mode_e mode, uint8_t *data);
 static void encode_motion_mode(chassis_motion_mode_e mode, uint8_t *data);
 static void encode_motion_ctrl(chassis_motion_ctrl_t *ctrl, uint8_t *data);
 
+
 static void decode_system_status(uint8_t *data, chassis_system_status_t *status);
 static void decode_wheel_speed(uint8_t *data, chassis_wheel_speed_t *speed);
 static void decode_wheel_angle(uint8_t *data, chassis_wheel_angle_t *angle);
@@ -98,6 +99,8 @@ static void encode_motion_ctrl(chassis_motion_ctrl_t *ctrl, uint8_t *data)
     data[6] = 0;  /* 保留 */
     data[7] = 0;  /* 保留 */
 }
+
+
 
 /******************************************************************************************/
 /* 解码函数实现 */
@@ -191,12 +194,14 @@ chassis_err_e chassis_driver_init(uint8_t test_mode)
     if (test_mode)
     {
         /* 回环测试模式(自己发自己收,用于调试) */
-        can_init(CAN_SJW_1TQ, CAN_BS2_6TQ, CAN_BS1_8TQ, 6, CAN_MODE_LOOPBACK);
+        /* 波特率=42M/(6*(1+8+5))=500Kbps */
+        can_init(CAN_SJW_1TQ, CAN_BS2_5TQ, CAN_BS1_8TQ, 6, CAN_MODE_LOOPBACK);
     }
     else
     {
         /* 正常模式(连接底盘) */
-        can_init(CAN_SJW_1TQ, CAN_BS2_6TQ, CAN_BS1_8TQ, 6, CAN_MODE_NORMAL);
+        /* 波特率=42M/(6*(1+8+5))=500Kbps */
+        can_init(CAN_SJW_1TQ, CAN_BS2_5TQ, CAN_BS1_8TQ, 6, CAN_MODE_NORMAL);
     }
 
     return CHASSIS_OK;
@@ -292,6 +297,7 @@ chassis_err_e chassis_send_motion_ctrl(chassis_motion_ctrl_t *ctrl)
 
     return CHASSIS_OK;
 }
+
 
 /**
  * @brief       处理底盘反馈消息

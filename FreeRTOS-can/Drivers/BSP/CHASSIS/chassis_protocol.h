@@ -27,8 +27,6 @@
 #define CAN_ID_CTRL_ENABLE          0x400   /* 控制模式使能 */
 #define CAN_ID_MOTION_MODE          0x401   /* 运动模式选择 */
 #define CAN_ID_MOTION_CTRL          0x402   /* 运动控制(最常用) */
-#define CAN_ID_WHEEL_SPEED_CTRL     0x403   /* 独立轮速控制 */
-#define CAN_ID_WHEEL_ANGLE_CTRL     0x404   /* 独立轮角控制 */
 #define CAN_ID_DO_CTRL              0x405   /* 外设输出控制 */
 
 /* 反馈消息ID (底盘 -> STM32) */
@@ -55,10 +53,11 @@ typedef enum
  */
 typedef enum
 {
-    MOTION_MODE_FORWARD = 0x00,     /* 正向模式(阿克曼转向) */
-    MOTION_MODE_REVERSE = 0x01,     /* 反向模式(横向平移) */
-    MOTION_MODE_SPIN = 0x02,        /* 自旋转模式(原地旋转) */
-    MOTION_MODE_USER = 0x03         /* 用户自主控制模式 */
+    MOTION_MODE_REVERSE = 0x01,     /* 0x01: 反向模式(横向螃蟹平移) */
+    MOTION_MODE_FORWARD = 0x02,     /* 0x02: 正向模式(阿克曼转向 - 默认最佳跑图模式) */
+    MOTION_MODE_SPIN    = 0x04,     /* 0x04: 自旋转模式(零半径原地打转) */
+    MOTION_MODE_USER    = 0x08,     /* 0x08: 用户自主控制模式(最高级微操) */
+    MOTION_MODE_PARK    = 0x10      /* 0x10: 驻车模式(车轮内八紧锁) */
 } chassis_motion_mode_e;
 
 /******************************************************************************************/
