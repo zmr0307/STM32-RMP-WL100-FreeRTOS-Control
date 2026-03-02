@@ -1,0 +1,3 @@
+uint8 battery_soc
+uint16 battery_voltage
+int16 battery_current

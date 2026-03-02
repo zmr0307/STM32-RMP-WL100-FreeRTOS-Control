@@ -1,0 +1,17 @@
+uint8 fault_code
+uint8 lf_motor_fault
+uint8 lr_motor_fault
+uint8 rf_motor_fault
+uint8 rr_motor_fault
+uint8 lf_steer_fault
+uint8 lr_steer_fault
+uint8 rf_steer_fault
+uint8 rr_steer_fault
+uint8 lf_motor_disconnect
+uint8 lr_motor_disconnect
+uint8 rf_motor_disconnect
+uint8 rr_motor_disconnect
+uint8 lf_steer_disconnect
+uint8 lr_steer_disconnect
+uint8 rf_steer_disconnect
+uint8 rr_steer_disconnect

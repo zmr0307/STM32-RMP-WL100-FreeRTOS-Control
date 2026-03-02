@@ -87,7 +87,7 @@ typedef struct
  * @brief 0x402: 运动控制(最常用)
  * @note  发送周期: 100ms
  *        速度单位: Vx/Vy = mm/s, Vz = rad/s
- *        协议编码: Vx×1000, Vy×1000, Vz×4000
+ *        协议编码: Vx×1000, Vy×1000, Vz×1000 (已修正为1000)
  */
 typedef struct
 {

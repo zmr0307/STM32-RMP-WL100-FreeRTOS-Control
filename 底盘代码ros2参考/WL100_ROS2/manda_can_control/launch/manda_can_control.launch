@@ -1,0 +1,3 @@
+<launch>
+  <node pkg="manda_can_control" exec="manda_can_control_node" name="manda_can_control_node" output="screen"/>
+</launch>
