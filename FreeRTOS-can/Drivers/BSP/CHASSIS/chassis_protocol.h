@@ -30,7 +30,7 @@
 #define CAN_ID_DO_CTRL              0x405   /* 外设输出控制 */
 
 /* 反馈消息ID (底盘 -> STM32) */
-#define CAN_ID_SYSTEM_STATUS        0x100   /* 系统状态(100ms) */
+#define CAN_ID_SYSTEM_STATUS        0x100   /* 系统状态(1000ms) */
 #define CAN_ID_WHEEL_SPEED          0x101   /* 四轮速度(30ms) */
 #define CAN_ID_WHEEL_ANGLE          0x102   /* 四轮角度(30ms) */
 #define CAN_ID_FAULT_FEEDBACK       0x103   /* 故障定位(1000ms) */
@@ -40,13 +40,21 @@
 /* 枚举类型定义 */
 
 /**
- * @brief 控制模式枚举
+ * @brief 控制模式枚举 (用于发送 0x400 控制使能命令的参数)
+ * @note  这里的值是"发送命令时填入的参数"，不是底盘反馈帧 0x100 里的状态码！
+ *        反馈帧 ctrl_mode 含义: 0x00=待机, 0x01=遥控器, 0x02=CAN指令控制
+ *        两者不可混用！比较反馈状态请用 CTRL_MODE_FB_CAN 宏
  */
 typedef enum
 {
-    CTRL_MODE_CAN = 0x01,           /* CAN控制模式 */
-    CTRL_MODE_REMOTE = 0x02         /* 遥控器模式 */
+    CTRL_MODE_CAN = 0x01,           /* 发送0x400时: 请求进入CAN控制 */
+    CTRL_MODE_REMOTE = 0x02         /* 发送0x400时: 请求进入遥控器模式 */
 } chassis_ctrl_mode_e;
+
+/* 底盘 0x100 反馈帧中 ctrl_mode 字段的状态码定义 (与发送命令参数不同!) */
+#define CTRL_MODE_FB_STANDBY    0x00    /* 反馈: 待机模式 */
+#define CTRL_MODE_FB_REMOTE     0x01    /* 反馈: 遥控器模式 */
+#define CTRL_MODE_FB_CAN        0x02    /* 反馈: CAN指令控制模式 (目标状态) */
 
 /**
  * @brief 运动模式枚举
@@ -105,7 +113,7 @@ typedef struct
 typedef struct
 {
     uint8_t  system_state;          /* 系统状态 (0x00正常, 0x01低电量) */
-    uint8_t  ctrl_mode;             /* 控制模式 (0x00待机, 0x01遥控, 0x02指令) */
+    uint8_t  ctrl_mode;             /* 控制模式反馈: 0x00=待机, 0x01=遥控, 0x02=CAN指令 (见 CTRL_MODE_FB_xxx) */
     uint8_t  peripheral_state;      /* 外设状态 (bit0:急停, bit1:避障, bit2:接近开关, bit3:安全触边) */
     uint8_t  soc;                   /* 电池电量百分比 (0~100) */
     uint16_t battery_voltage;       /* 电池总电压 (10mV) */

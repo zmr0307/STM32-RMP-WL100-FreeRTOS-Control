@@ -117,8 +117,13 @@ static void decode_system_status(uint8_t *data, chassis_system_status_t *status)
     status->ctrl_mode       = data[1];                        /* Byte[1]: 控制模式 */
     status->peripheral_state = data[2];                       /* Byte[2]: 外设状态 */
     status->soc             = data[3];                        /* Byte[3]: SOC */
-    status->battery_voltage = (data[4] << 8) | data[5];       /* Byte[4-5]: 电压(10mV) */
-    status->battery_current = (int16_t)((data[6] << 8) | data[7]); /* Byte[6-7]: 电流(10mA) */
+    status->battery_voltage = (data[4] << 8) | data[5];       /* Byte[4-5]: 电压(10mV) (大端) */
+    
+    /* Byte[6-7]: 电流(10mA)
+     * 注意：经过真车实际测试，待机电流应为 -570mA (0xFFC7)。
+     * 如果用小端会解码成 -143A，因此证实官方底盘的电流数据依然是标准大端序！
+     */
+    status->battery_current = (int16_t)((data[6] << 8) | data[7]);
 }
 
 /**

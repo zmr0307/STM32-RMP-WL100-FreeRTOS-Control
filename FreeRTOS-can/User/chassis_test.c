@@ -15,6 +15,7 @@
 #include "./BSP/LED/led.h"
 #include "./BSP/LCD/lcd.h"
 #include "./BSP/CHASSIS/chassis_driver.h"
+#include "./BSP/JETSON/jetson_usart.h"
 
 /* FreeRTOS headers */
 #include "FreeRTOS.h"
@@ -80,6 +81,27 @@ void safe_printf(const char *format, ...)
 #define printf(...) safe_printf(__VA_ARGS__)
 
 /******************************************************************************************************/
+/*                              FreeRTOS 栈溢出报警钩子                                               */
+/******************************************************************************************************/
+
+/**
+ * @brief  FreeRTOS 栈溢出检测回调（configCHECK_FOR_STACK_OVERFLOW = 2 时生效）
+ * @note   任何任务栈溢出时，系统会自动调用此函数。LED 疯狂闪烁 + LCD 红字报警。
+ */
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+    /* LCD 显示崩溃信息 */
+    lcd_show_string(10, 280, 240, 16, 16, "!!! STACK OVERFLOW !!!", RED);
+    
+    /* LED0 疯狂闪烁示警，方便物理观察 */
+    while (1)
+    {
+        LED0_TOGGLE();
+        for (volatile uint32_t i = 0; i < 500000; i++);  /* 粗略延时，此时调度器已死 */
+    }
+}
+
+/******************************************************************************************************/
 /*                                    主函数                                                          */
 /******************************************************************************************************/
 
@@ -95,7 +117,7 @@ void chassis_test_demo(void)
     lcd_show_string(10, 10, 220, 32, 32, "STM32", RED);
     lcd_show_string(10, 47, 220, 24, 24, "Chassis Test", RED);
     lcd_show_string(10, 76, 220, 16, 16, "ATOM@ALIENTEK", RED);
-    lcd_show_string(10, 100, 220, 16, 16, "LoopBack Mode", BLUE);
+    lcd_show_string(10, 100, 220, 16, 16, "CAN NORMAL Mode", BLUE);
 
     printf("\r\n========================================\r\n");
     printf("Chassis Driver Test Program Start\r\n");
@@ -111,6 +133,10 @@ void chassis_test_demo(void)
         printf("[Init] Chassis driver init failed!\r\n");
         while (1);
     }
+
+    /* 🔌 初始化高速接收引擎 (115200波特率, 接Jetson/电脑USB) */
+    jetson_usart_init(115200);
+    printf("[Init] JETSON USART3 DMA-IDLE Engine Started.\r\n");
 
     /* ② 创建CAN接收消息队列 */
     g_can_rx_queue = xQueueCreate(CAN_RX_QUEUE_LEN, sizeof(CAN_RxData_t));
@@ -176,120 +202,120 @@ void start_task(void *pvParameters)
 }
 
 /**
- * @brief  底盘安全全向首飞微操测试任务
- * @note   利用底座内置 0x402 全向平滑算法，测试机器人的运动控制：
- *         1. 切入自旋模式 0x04
- *         2. 状态交替：停稳 5秒 -> 逆时针自转 2秒 -> 永久安全停车
- *         不会改变 LCD 刷屏任务。
+ * @brief  底盘安全全向微操任务 (从 Jetson 映射)
+ * @note   利用底座内置 0x402 全向平滑算法，实时拉取串口指令。
  */
 void chassis_ctrl_task(void *pvParameters)
 {
     chassis_err_e ret;
     chassis_motion_ctrl_t motion_cmd;
+    jetson_ctrl_cmd_t *jetson_data;
 
-    uint8_t state_step = 0;   /* 0: 静止等待, 1: 侧向微滑 */
-    uint16_t timer_100ms = 0; /* 100ms计次定时器 */
+    /* 初始锁定发送速度为 0 */
+    float target_vx = 0.0f;
+    float target_vy = 0.0f;
+    float target_vz = 0.0f;
 
-    printf("\r\n>>> Chassis OMNI-DIRECTIONAL Safe Test Task Start <<<\r\n");
+    printf("\r\n>>> Chassis JETSON-TELEOP Ready <<<\r\n");
 
-    vTaskDelay(1000);  /* Wait 1s for system stable */
+    vTaskDelay(1000);  
 
-    /* ========== Test1: Send control enable ========== */
-    ret = chassis_send_ctrl_enable(CTRL_MODE_CAN);
-    if (ret == CHASSIS_OK)
-    {
-        lcd_show_string(10, 130, 220, 16, 16, "Enable: OK  ", GREEN);
-    }
-    else
-    {
-        lcd_show_string(10, 130, 220, 16, 16, "Enable: FAIL", RED);
-    }
-
-    vTaskDelay(500);
-
-    /* ========== Test2: Send SPIN Mode (自旋模式，交由原厂内部做平滑处理) ========== */
-    printf("\r\n[Test2] Requesting SPIN Control Mode (0x04)...\r\n");
-    /* 发送自带的原地打转模式 */
-    ret = chassis_send_motion_mode(MOTION_MODE_SPIN); 
-    if (ret == CHASSIS_OK)
-    {
-        /* 借用以前LCD字符占位免得LCD闪烁 */
-        lcd_show_string(10, 150, 220, 16, 16, "Mode: SPIN  ", BLUE); 
-    }
-
-    vTaskDelay(500);
-
-    /* ========== Test3: OMNI Safe Loop (100ms周期循环) ========== */
-    printf("\r\n[Test3] Starting SPIN Test (Stop 5s, CCW 2s, Stop Forever)\r\n");
+    /* ========== Test3: OMNI RealTime Loop (10ms高速周期) + 自愈重连系统 ========== */
+    printf("\r\n[Test3] Starting Realtime Serial Loop with Self-Healing...\r\n");
 
     while (1)
     {
-        float target_vx = 0.0f;
-        float target_vy = 0.0f;
-        float target_vz = 0.0f;
-
-        /* 简易安全状态机 */
-        if (state_step == 0)
+        /* ---【系统级自愈保护：心跳与模式监测】---
+         * 不断嗅探车身原厂底座反馈回来的 0x100 状态里的控制位 和 在线心跳
+         * 如果底盘刚上电或者因为一些干扰掉出了 CAN 控制模式，立刻强杀所有的速度下发，切入重连挽救流程！
+         *
+         * 重要：底盘 0x100 反馈帧中 ctrl_mode 的含义：
+         *   0x00 = 待机模式
+         *   0x01 = 遥控器模式  
+         *   0x02 = CAN指令控制模式 (我们需要达到的目标状态)
+         * 注意: 发送 0x400 使能时用的 CTRL_MODE_CAN=0x01是控制命令的参数，
+         *           与反馈帧中返回的状态码含义不同！不能直接混用！
+         */
+        if (chassis_is_online() == 0 || chassis_get_state()->system_status.ctrl_mode != CTRL_MODE_FB_CAN)
         {
-            /* 状态 0：绝对静止期 (5秒 = 50 * 100ms) */
+            /* 1. 强制锁死目标车速为 0 */
             target_vx = 0.0f;
             target_vy = 0.0f;
             target_vz = 0.0f;
-            
-            if (timer_100ms == 0) printf("\r\n[SAFE STOP] Wheels aligning to 0, holding for 5s...");
-            lcd_show_string(10, 170, 220, 16, 16, "Ctrl: STOP  ", BLUE);
 
-            timer_100ms++;
-            if (timer_100ms >= 50) 
+            if (chassis_is_online() == 0)
             {
-                state_step = 1;
-                timer_100ms = 0;
+                lcd_show_string(10, 130, 240, 16, 16, "Status: OFFLINE...     ", RED);
             }
-        }
-        else if (state_step == 1)
-        {
-            /* 状态 1：原地陀螺缓慢自转期 (2秒 = 20 * 100ms, 逆时针恢复) */
-            target_vx = 0.0f;  
-            target_vy = 0.0f; 
-            target_vz = 0.2f; /* 自转反向恢复：逆时针旋转，+0.2 弧度/秒 */
-            
-            if (timer_100ms == 0) printf("\r\n[SPIN] Spinning CCW (Positive Z) at +0.2 rad/s for 2s...");
-            lcd_show_string(10, 170, 220, 16, 16, "Ctrl: CCW   ", MAGENTA);
-
-            timer_100ms++;
-            if (timer_100ms >= 20) 
+            else
             {
-                /* 执行完2秒恢复自传后，斩断循环，进入永久停机状态 */
-                state_step = 2; 
-                timer_100ms = 0;
+                lcd_show_string(10, 130, 240, 16, 16, "Status: Reconnecting...", MAGENTA);
             }
-        }
-        else if (state_step == 2)
-        {
-            /* 状态 2：永久静止期 (测试结束保活) */
-            target_vx = 0.0f;
-            target_vy = 0.0f;
-            target_vz = 0.0f;
+            lcd_show_string(10, 150, 240, 16, 16, "Mode: WAIT FOR SYNC ", RED);
+
+            /* 2. 疯狂向底盘补发“我要用CAN夺权使能” */
+            ret = chassis_send_ctrl_enable(CTRL_MODE_CAN);
             
-            if (timer_100ms == 0) printf("\r\n[TEST DONE] Test sequence finished. Holding 0 speed forever.");
-            lcd_show_string(10, 170, 220, 16, 16, "Ctrl: FINISH", BLUE);
+            /* 3. 顺便把运动模式也敲死进去 (正向全向兼容模式) */
+            if (ret == CHASSIS_OK)
+            {
+                chassis_send_motion_mode(MOTION_MODE_FORWARD); 
+            }
+
+            /* 既然在抢修通讯期间，就不要高频发包耗电了，休息一会等车子反应过来再战 */
+            vTaskDelay(500);
+            
+            /* 抢修期跳过后续所有打控制指令的操作，直接下一把 */
+            continue; 
+        }
+        else
+        {
+            /* 车子已经乖乖在手底下听话了，我们显示一点安心的绿色 */
+            lcd_show_string(10, 130, 240, 16, 16, "Status: CAN ONLINE   ", GREEN);
+            lcd_show_string(10, 150, 240, 16, 16, "Mode: FORWARD ACTIVE ", BLUE);
         }
 
-        /* 1. 不再调用手写的矩阵！直接将 Vz 塞给官方 0x402 骨架 */
+        /* ---【常规业务：提取最新串口高速缓存】--- */
+        jetson_data = get_jetson_cmd_ptr();
+        
+        /* 临界区保护：防止 USART3 中断在读取途中写入新值导致半帧撕裂 */
+        __disable_irq();
+        if (jetson_data->frame_valid)
+        {
+            /* 有合法新帧到达！取出大端序收到的 1000 倍率整型，除以 1000f 变回实际浮点数交接 */
+            target_vx = (float)(jetson_data->target_vx) / 1000.0f;
+            target_vy = (float)(jetson_data->target_vy) / 1000.0f;
+            target_vz = (float)(jetson_data->target_vz) / 1000.0f;
+            
+            /* 清除标志位，等下一包 */
+            jetson_data->frame_valid = 0;
+        }
+        __enable_irq();
+        
+        if (target_vx != 0.0f || target_vy != 0.0f || target_vz != 0.0f)
+        {
+            lcd_show_string(10, 170, 240, 16, 16, "Ctrl: JETSON CMD", MAGENTA);
+        }
+        else
+        {
+            /* 收到全0指令 (刹车) */
+            lcd_show_string(10, 170, 240, 16, 16, "Ctrl: STOP CMD  ", BLUE);
+        }
+
+        /* 灌递给平滑处理黑盒 (软限幅在函数内部会自动生效) */
         motion_cmd.vx = target_vx;
         motion_cmd.vy = target_vy;
         motion_cmd.vz = target_vz;
 
-        /* 3. 使用底盘内部的全向平滑避磨损算法处理 */
         chassis_err_e err = chassis_send_motion_ctrl(&motion_cmd);
 
         if (err != CHASSIS_OK)
         {
-            lcd_show_string(10, 170, 220, 16, 16, "Ctrl: CANERR", RED);
+            lcd_show_string(10, 170, 240, 16, 16, "Ctrl: CANERR    ", RED);
         }
 
-        /* 必须维持在 100ms 的精确发包心跳 */
-        vTaskDelay(100);  
+        /* 降频发包以维持底盘连贯动作响应，50Hz防爆箱 (20ms级较优) */
+        vTaskDelay(20);  
     }
 }
 
@@ -307,8 +333,8 @@ void chassis_rx_task(void *pvParameters)
 
     while (1)
     {
-        /* 从队列等待接收数据（永久等待） */
-        ret = xQueueReceive(g_can_rx_queue, &rx_data, portMAX_DELAY);
+        /* 从队列等待接收数据（最多等200ms，超时也要刷新在线状态） */
+        ret = xQueueReceive(g_can_rx_queue, &rx_data, pdMS_TO_TICKS(200));
 
         if (ret == pdTRUE)
         {
@@ -390,16 +416,16 @@ void chassis_rx_task(void *pvParameters)
                     /* printf("[RX] Unknown ID: 0x%03X\r\n", rx_data.id); */
                     break;
             }
+        }
 
-            /* 检查底盘在线状态 */
-            if (chassis_is_online())
-            {
-                lcd_show_string(10, 190, 220, 16, 16, "Status: ONLINE ", GREEN);
-            }
-            else
-            {
-                lcd_show_string(10, 190, 220, 16, 16, "Status: OFFLINE", RED);
-            }
+        /* 【移到 if 外面】无论有没有收到新包，每200ms都刷新一次在线状态 */
+        if (chassis_is_online())
+        {
+            lcd_show_string(10, 190, 220, 16, 16, "Status: ONLINE ", GREEN);
+        }
+        else
+        {
+            lcd_show_string(10, 190, 220, 16, 16, "Status: OFFLINE", RED);
         }
     }
 }

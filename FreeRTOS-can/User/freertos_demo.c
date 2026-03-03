@@ -34,30 +34,30 @@
 /* ============ 启动任务 ============ */
 #define START_TASK_PRIO     1
 #define START_STK_SIZE      128
-TaskHandle_t StartTask_Handler;
-void start_task(void *pvParameters);
+static TaskHandle_t StartTask_Handler;
+static void start_task(void *pvParameters);
 
 /* ============ CAN发送任务 ============ */
 #define CAN_TX_TASK_PRIO    2               /* 任务优先级较低 */
 #define CAN_TX_STK_SIZE     256
-TaskHandle_t CAN_TX_Task_Handler;
-void can_tx_task(void *pvParameters);
+static TaskHandle_t CAN_TX_Task_Handler;
+static void can_tx_task(void *pvParameters);
 
 /* ============ CAN接收处理任务 ============ */
 #define CAN_RX_TASK_PRIO    3               /* 任务优先级较高，数据更重要*/
 #define CAN_RX_STK_SIZE     256
-TaskHandle_t CAN_RX_Task_Handler;
-void can_rx_task(void *pvParameters);
+static TaskHandle_t CAN_RX_Task_Handler;
+static void can_rx_task(void *pvParameters);
 
 /* ============ LED闪烁任务 ============ */
 #define LED_TASK_PRIO       1               /* 任务优先级最低 */
 #define LED_STK_SIZE        128
-TaskHandle_t LED_Task_Handler;
-void led_task(void *pvParameters);
+static TaskHandle_t LED_Task_Handler;
+static void led_task(void *pvParameters);
 
 /* ============ CAN接收消息队列 ============ */
 #define CAN_RX_QUEUE_LEN    10              /* 队列长度，最多缓存10条CAN消息 */
-QueueHandle_t g_can_rx_queue;               /* 队列句柄 */
+static QueueHandle_t g_can_rx_queue;               /* 队列句柄 */
 
 /******************************************************************************************************/
 /*                                    核心函数                                                          */
