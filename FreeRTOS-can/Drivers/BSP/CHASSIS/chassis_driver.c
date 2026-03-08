@@ -134,10 +134,10 @@ static void decode_system_status(uint8_t *data, chassis_system_status_t *status)
  */
 static void decode_wheel_speed(uint8_t *data, chassis_wheel_speed_t *speed)
 {
-    speed->wheel1_speed = (data[0] << 8) | data[1];
-    speed->wheel2_speed = (data[2] << 8) | data[3];
-    speed->wheel3_speed = (data[4] << 8) | data[5];
-    speed->wheel4_speed = (data[6] << 8) | data[7];
+    speed->wheel1_speed = (int16_t)((data[0] << 8) | data[1]);
+    speed->wheel2_speed = (int16_t)((data[2] << 8) | data[3]);
+    speed->wheel3_speed = (int16_t)((data[4] << 8) | data[5]);
+    speed->wheel4_speed = (int16_t)((data[6] << 8) | data[7]);
 }
 
 /**
@@ -148,10 +148,10 @@ static void decode_wheel_speed(uint8_t *data, chassis_wheel_speed_t *speed)
  */
 static void decode_wheel_angle(uint8_t *data, chassis_wheel_angle_t *angle)
 {
-    angle->wheel1_angle = (data[0] << 8) | data[1];
-    angle->wheel2_angle = (data[2] << 8) | data[3];
-    angle->wheel3_angle = (data[4] << 8) | data[5];
-    angle->wheel4_angle = (data[6] << 8) | data[7];
+    angle->wheel1_angle = (int16_t)((data[0] << 8) | data[1]);
+    angle->wheel2_angle = (int16_t)((data[2] << 8) | data[3]);
+    angle->wheel3_angle = (int16_t)((data[4] << 8) | data[5]);
+    angle->wheel4_angle = (int16_t)((data[6] << 8) | data[7]);
 }
 
 /**

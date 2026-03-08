@@ -66,7 +66,7 @@ uint8_t can_init(uint32_t tsjw, uint32_t tbs2, uint32_t tbs1, uint16_t brp, uint
     g_canx_handler.Init.TimeTriggeredMode = DISABLE;    /* 非时间触发通信模式 */
     g_canx_handler.Init.AutoBusOff = DISABLE;           /* 软件自动离线管理 */
     g_canx_handler.Init.AutoWakeUp = DISABLE;           /* 睡眠模式通过软件唤醒(清除CAN->MCR的SLEEP位) */
-    g_canx_handler.Init.AutoRetransmission = ENABLE;    /* 禁止报文自动传送 */
+    g_canx_handler.Init.AutoRetransmission = ENABLE;    /* 使能报文自动重传 */
     g_canx_handler.Init.ReceiveFifoLocked = DISABLE;    /* 报文不锁定,新的覆盖旧的 */
     g_canx_handler.Init.TransmitFifoPriority = DISABLE; /* 优先级由报文标识决定 */
     if (HAL_CAN_Init(&g_canx_handler) != HAL_OK)
@@ -79,7 +79,7 @@ uint8_t can_init(uint32_t tsjw, uint32_t tbs2, uint32_t tbs1, uint16_t brp, uint
     /* 使能中断接收 */
     __HAL_CAN_ENABLE_IT(&g_canx_handler, CAN_IT_RX_FIFO0_MSG_PENDING); /* FIFO0消息挂号中断允许 */
     HAL_NVIC_EnableIRQ(CAN1_RX0_IRQn);                                 /* 使能CAN中断 */
-    HAL_NVIC_SetPriority(CAN1_RX0_IRQn, 6, 0);                         /* 抢占优先级1，子优先级0 */
+    HAL_NVIC_SetPriority(CAN1_RX0_IRQn, 6, 0);                         /* 抢占优先级6，子优先级0 */
 #endif
 
     CAN_FilterTypeDef sFilterConfig;

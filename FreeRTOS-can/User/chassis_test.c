@@ -376,18 +376,18 @@ void chassis_rx_task(void *pvParameters)
                         printf("--------------------------------\r\n");
                         
                         /* 2. LCD 屏幕显示刷新 (坐标 10, 210 往下排列) */
-                        sprintf(lcd_buf, "BAT:%.1fV %02d%% %5dmA", 
+                        snprintf(lcd_buf, sizeof(lcd_buf), "BAT:%.1fV %02d%% %5dmA", 
                                 state->system_status.battery_voltage * 10 / 1000.0f, 
                                 state->system_status.soc,
                                 state->system_status.battery_current * 10);
                         lcd_show_string(10, 210, 240, 16, 16, lcd_buf, BLUE);
                         
-                        sprintf(lcd_buf, "Spd: %4d %4d %4d %4d", 
+                        snprintf(lcd_buf, sizeof(lcd_buf), "Spd: %4d %4d %4d %4d", 
                                 state->wheel_speed.wheel1_speed, state->wheel_speed.wheel2_speed,
                                 state->wheel_speed.wheel3_speed, state->wheel_speed.wheel4_speed);
                         lcd_show_string(10, 230, 240, 16, 16, lcd_buf, MAGENTA);
                         
-                        sprintf(lcd_buf, "Ang: %3d  %3d  %3d  %3d", 
+                        snprintf(lcd_buf, sizeof(lcd_buf), "Ang: %3d  %3d  %3d  %3d", 
                                 (int)(state->wheel_angle.wheel1_angle * 0.01f), (int)(state->wheel_angle.wheel2_angle * 0.01f),
                                 (int)(state->wheel_angle.wheel3_angle * 0.01f), (int)(state->wheel_angle.wheel4_angle * 0.01f));
                         lcd_show_string(10, 250, 240, 16, 16, lcd_buf, MAGENTA);
