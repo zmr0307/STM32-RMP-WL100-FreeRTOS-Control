@@ -32,11 +32,26 @@ typedef struct
 } jetson_ctrl_cmd_t;
 
 
+/******************************************************************************************/
+/* 上报协议宏定义 (STM32 -> Jetson, 与下发协议 A5 5A 完全独立) */
+
+#define JETSON_REPORT_HEADER1       0xAA    /* 上报帧头第1字节 */
+#define JETSON_REPORT_HEADER2       0x55    /* 上报帧头第2字节 */
+#define JETSON_REPORT_TAIL          0xEE    /* 上报帧尾 */
+#define JETSON_REPORT_FRAME_LEN     11      /* 上报帧总长度: 帧头2 + 类型1 + 数据6 + 校验1 + 帧尾1 */
+
+/* 上报消息类型 */
+#define JETSON_REPORT_TYPE_ODOM     0x01    /* 里程计速度上报 */
+#define JETSON_REPORT_TYPE_BATTERY  0x02    /* 电池状态上报(预留) */
+
+/******************************************************************************************/
+
 /* 外部接口 */
 extern UART_HandleTypeDef g_uart3_handle;         /* USART3 UART句柄 */
 extern DMA_HandleTypeDef g_dma_uart3_rx_handle;   /* USART3 接收DMA句柄 */
 
 void jetson_usart_init(uint32_t baudrate);        /* 初始化函数 */
 jetson_ctrl_cmd_t* get_jetson_cmd_ptr(void);      /* 获取速度容器指针 */
+void jetson_report_odom(int16_t vx, int16_t vy, int16_t vz);  /* 里程计速度上报 */
 
 #endif

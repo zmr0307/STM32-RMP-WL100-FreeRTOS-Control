@@ -182,3 +182,49 @@ void USART3_IRQHandler(void)
     /* 其他默认错误（溢出等）依然交回HAL库内部清理 */
     HAL_UART_IRQHandler(&g_uart3_handle);
 }
+
+/******************************************************************************************/
+/* 里程计上报函数 (STM32 -> Jetson) */
+
+/**
+ * @brief       向 Jetson 上报底盘里程计速度 (Vx/Vy/Vz)
+ * @param       vx: X方向真实线速度 (单位: 0.001 m/s, 即底盘 0x104 原始值)
+ * @param       vy: Y方向真实线速度 (单位: 0.001 m/s)
+ * @param       vz: Z方向真实角速度 (单位: 0.001 rad/s)
+ * @note        帧格式: [AA][55][0x01][Vx_H][Vx_L][Vy_H][Vy_L][Vz_H][Vz_L][XOR][EE]
+ *              共 11 字节, 使用阻塞式发送, @115200 约需 1ms, 不影响系统实时性
+ *              本函数仅操作 USART3 的 TX 通道, 与 DMA RX 接收引擎完全独立互不干扰
+ */
+void jetson_report_odom(int16_t vx, int16_t vy, int16_t vz)
+{
+    uint8_t tx_buf[JETSON_REPORT_FRAME_LEN];
+    uint8_t xor_check = 0;
+
+    /* 帧头 (与下发的 A5 5A 完全不同, Jetson 端可直接区分方向) */
+    tx_buf[0] = JETSON_REPORT_HEADER1;     /* 0xAA */
+    tx_buf[1] = JETSON_REPORT_HEADER2;     /* 0x55 */
+
+    /* 消息类型 */
+    tx_buf[2] = JETSON_REPORT_TYPE_ODOM;   /* 0x01 = 里程计速度 */
+
+    /* 速度数据 (大端序: 高字节在前, 与整个项目字节序策略一致) */
+    tx_buf[3] = (uint8_t)((vx >> 8) & 0xFF);
+    tx_buf[4] = (uint8_t)(vx & 0xFF);
+    tx_buf[5] = (uint8_t)((vy >> 8) & 0xFF);
+    tx_buf[6] = (uint8_t)(vy & 0xFF);
+    tx_buf[7] = (uint8_t)((vz >> 8) & 0xFF);
+    tx_buf[8] = (uint8_t)(vz & 0xFF);
+
+    /* XOR 校验: 对 tx_buf[0] ~ tx_buf[8] 共 9 个字节异或 */
+    for (uint8_t i = 0; i < 9; i++)
+    {
+        xor_check ^= tx_buf[i];
+    }
+    tx_buf[9] = xor_check;
+
+    /* 帧尾 */
+    tx_buf[10] = JETSON_REPORT_TAIL;       /* 0xEE */
+
+    /* 阻塞式发送 (11字节 @115200 ≈ 1ms, 超时保护 10ms) */
+    HAL_UART_Transmit(&g_uart3_handle, tx_buf, JETSON_REPORT_FRAME_LEN, 10);
+}

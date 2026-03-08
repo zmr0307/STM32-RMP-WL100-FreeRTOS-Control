@@ -403,7 +403,10 @@ void chassis_rx_task(void *pvParameters)
                 case CAN_ID_FAULT_FEEDBACK:  /* 0x103 故障包 (1000ms级, 屏蔽以防干扰仪表盘) */
                     break;
 
-                case CAN_ID_MOTION_FEEDBACK: /* 0x104 运动反馈 (20ms级, 屏蔽单行打印以防刷屏) */
+                case CAN_ID_MOTION_FEEDBACK: /* 0x104 运动反馈 (20ms级, 触发里程计上报给Jetson) */
+                    jetson_report_odom(state->motion_feedback.vx_fb,
+                                       state->motion_feedback.vy_fb,
+                                       state->motion_feedback.vz_fb);
                     break;
 
                 case CAN_ID_CTRL_ENABLE:     
