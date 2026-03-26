@@ -243,6 +243,26 @@ uint8_t chassis_is_online(void)
 }
 
 /**
+ * @brief       检查底盘驱动器是否故障
+ * @param       无
+ * @retval      0: 正常, 非0: 有故障 (来自0x103 Byte[0])
+ */
+uint8_t chassis_has_fault(void)
+{
+    return g_chassis_state.fault_status.fault_flag;
+}
+
+/**
+ * @brief       检查底盘急停开关是否触发
+ * @param       无
+ * @retval      0: 未触发, 1: 已触发 (来自0x100 Byte[2] Bit0)
+ */
+uint8_t chassis_is_estop(void)
+{
+    return (g_chassis_state.system_status.peripheral_state & 0x01);
+}
+
+/**
  * @brief       发送控制模式使能消息(0x400)
  * @param       mode: 控制模式
  * @retval      CHASSIS_OK: 成功, CHASSIS_ERR_CAN: CAN发送失败

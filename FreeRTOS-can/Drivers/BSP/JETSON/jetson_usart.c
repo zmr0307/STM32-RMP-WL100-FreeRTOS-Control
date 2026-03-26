@@ -231,8 +231,12 @@ void jetson_report_odom(int16_t vx, int16_t vy, int16_t vz)
     /* 帧尾 */
     tx_buf[10] = JETSON_REPORT_TAIL;       /* 0xEE */
 
-    /* 阻塞式发送 (11字节 @115200 ≈ 1ms, 超时保护 10ms) */
+    /* 阻塞式发送 (11字节 @115200 ≈ 1ms, 超时保护 10ms)
+     * 发送期间禁用 IDLE 中断, 防止 ISR 与阻塞发送竞争 HAL 句柄 Lock
+     * DMA 仍在后台缓冲接收数据, 不会丢失, 发送完后恢复 IDLE 解析 */
+    __HAL_UART_DISABLE_IT(&g_uart3_handle, UART_IT_IDLE);
     HAL_UART_Transmit(&g_uart3_handle, tx_buf, JETSON_REPORT_FRAME_LEN, 10);
+    __HAL_UART_ENABLE_IT(&g_uart3_handle, UART_IT_IDLE);
 }
 
 /**

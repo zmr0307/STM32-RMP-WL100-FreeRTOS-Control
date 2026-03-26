@@ -64,7 +64,7 @@ uint8_t can_init(uint32_t tsjw, uint32_t tbs2, uint32_t tbs1, uint16_t brp, uint
     g_canx_handler.Init.TimeSeg1 = tbs1;                /* tbs1范围CAN_BS1_1TQ~CAN_BS1_16TQ */
     g_canx_handler.Init.TimeSeg2 = tbs2;                /* tbs2范围CAN_BS2_1TQ~CAN_BS2_8TQ */
     g_canx_handler.Init.TimeTriggeredMode = DISABLE;    /* 非时间触发通信模式 */
-    g_canx_handler.Init.AutoBusOff = DISABLE;           /* 软件自动离线管理 */
+    g_canx_handler.Init.AutoBusOff = ENABLE;            /* 硬件自动Bus-Off恢复 */
     g_canx_handler.Init.AutoWakeUp = DISABLE;           /* 睡眠模式通过软件唤醒(清除CAN->MCR的SLEEP位) */
     g_canx_handler.Init.AutoRetransmission = ENABLE;    /* 使能报文自动重传 */
     g_canx_handler.Init.ReceiveFifoLocked = DISABLE;    /* 报文不锁定,新的覆盖旧的 */

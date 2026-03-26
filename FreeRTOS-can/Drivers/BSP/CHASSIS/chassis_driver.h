@@ -61,6 +61,9 @@ chassis_err_e chassis_send_motion_mode(chassis_motion_mode_e mode);
 chassis_err_e chassis_send_motion_ctrl(chassis_motion_ctrl_t *ctrl);
 
 
+/* 安全状态查询 */
+uint8_t chassis_has_fault(void);     /* 检查驱动器是否故障 (0x103 fault_flag) */
+uint8_t chassis_is_estop(void);      /* 检查急停开关是否触发 (0x100 peripheral_state bit0) */
 
 /* 反馈消息处理 */
 void chassis_process_feedback(uint32_t can_id, uint8_t *data, uint8_t len);

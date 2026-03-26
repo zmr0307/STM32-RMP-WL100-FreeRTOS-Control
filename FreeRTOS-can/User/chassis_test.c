@@ -26,6 +26,28 @@ extern uint32_t g_uart3_ore_cnt;
 #include "queue.h"
 
 /******************************************************************************************************/
+/*                                    IWDG 硬件看门狗                                                  */
+/******************************************************************************************************/
+
+static IWDG_HandleTypeDef g_iwdg_handle;  /* IWDG 句柄 */
+
+/**
+ * @brief       初始化独立看门狗 (4秒超时)
+ * @note        LSI ≈ 32KHz, 预分频=64, 重装载=2000
+ *              超时 = 64 × 2000 / 32000 = 4秒
+ *              调试时自动冻结，防止断点触发复位
+ */
+static void iwdg_init(void)
+{
+    g_iwdg_handle.Instance = IWDG;
+    g_iwdg_handle.Init.Prescaler = IWDG_PRESCALER_64;  /* 32KHz/64 = 500Hz */
+    g_iwdg_handle.Init.Reload = 2000;                  /* 2000/500 = 4秒 */
+    HAL_IWDG_Init(&g_iwdg_handle);
+
+    __HAL_DBGMCU_FREEZE_IWDG();  /* ST-Link 调试时冻结看门狗 */
+}
+
+/******************************************************************************************************/
 /*                                    FreeRTOS Tasks                                                   */
 /******************************************************************************************************/
 
@@ -156,7 +178,11 @@ void chassis_test_demo(void)
     /* ③ 设置队列句柄给CAN驱动（中断会往队列发数据） */
     can_set_rx_queue(g_can_rx_queue);
 
-    /* ④ 创建启动任务 */
+    /* ④ 初始化 IWDG 硬件看门狗 (4秒超时, 由 led_task 喂狗) */
+    iwdg_init();
+    printf("[Init] IWDG Watchdog Started (4s timeout)\r\n");
+
+    /* ⑤ 创建启动任务 */
     xTaskCreate((TaskFunction_t )start_task,
                 (const char*    )"start_task",
                 (uint16_t       )START_STK_SIZE,
@@ -164,7 +190,7 @@ void chassis_test_demo(void)
                 (UBaseType_t    )START_TASK_PRIO,
                 (TaskHandle_t*  )&StartTask_Handler);
 
-    /* ⑤ 启动调度器 */
+    /* ⑥ 启动调度器 */
     vTaskStartScheduler();
 }
 
@@ -222,6 +248,10 @@ void chassis_ctrl_task(void *pvParameters)
     float target_vy = 0.0f;
     float target_vz = 0.0f;
 
+    /* 故障安全拦截变量 */
+    uint32_t fault_start_tick = 0;  /* 驱动器故障开始时间戳 */
+    uint8_t  fault_parked = 0;     /* 是否已切入驻车模式 */
+
     printf("\r\n>>> Chassis JETSON-TELEOP Ready <<<\r\n");
 
     vTaskDelay(1000);  
@@ -231,6 +261,10 @@ void chassis_ctrl_task(void *pvParameters)
 
     while (1)
     {
+        /* 缓存底盘状态快照, 避免同一轮循环内多次读取被抢占更新导致不一致 */
+        uint8_t cached_online = chassis_is_online();
+        uint8_t cached_ctrl_mode = chassis_get_state()->system_status.ctrl_mode;
+
         /* ---【系统级自愈保护：心跳与模式监测】---
          * 不断嗅探车身原厂底座反馈回来的 0x100 状态里的控制位 和 在线心跳
          * 如果底盘刚上电或者因为一些干扰掉出了 CAN 控制模式，立刻强杀所有的速度下发，切入重连挽救流程！
@@ -242,30 +276,42 @@ void chassis_ctrl_task(void *pvParameters)
          * 注意: 发送 0x400 使能时用的 CTRL_MODE_CAN=0x01是控制命令的参数，
          *           与反馈帧中返回的状态码含义不同！不能直接混用！
          */
-        if (chassis_is_online() == 0 || chassis_get_state()->system_status.ctrl_mode != CTRL_MODE_FB_CAN)
+        if (cached_online == 0 || cached_ctrl_mode != CTRL_MODE_FB_CAN)
         {
             /* 1. 强制锁死目标车速为 0 */
             target_vx = 0.0f;
             target_vy = 0.0f;
             target_vz = 0.0f;
 
-            if (chassis_is_online() == 0)
+            if (cached_online == 0)
             {
                 lcd_show_string(10, 130, 240, 16, 16, "Status: OFFLINE...     ", RED);
+                lcd_show_string(10, 150, 240, 16, 16, "Mode: OFFLINE        ", RED);
+            }
+            else if (cached_ctrl_mode == CTRL_MODE_FB_REMOTE)
+            {
+                lcd_show_string(10, 130, 240, 16, 16, "Status: CAN ONLINE   ", GREEN);
+                lcd_show_string(10, 150, 240, 16, 16, "Mode: REMOTE CTRL   ", YELLOW);
             }
             else
             {
                 lcd_show_string(10, 130, 240, 16, 16, "Status: Reconnecting...", MAGENTA);
+                lcd_show_string(10, 150, 240, 16, 16, "Mode: STANDBY        ", RED);
             }
-            lcd_show_string(10, 150, 240, 16, 16, "Mode: WAIT FOR SYNC ", RED);
 
-            /* 2. 疯狂向底盘补发“我要用CAN夺权使能” */
-            ret = chassis_send_ctrl_enable(CTRL_MODE_CAN);
-            
-            /* 3. 顺便把运动模式也敲死进去 (正向全向兼容模式) */
-            if (ret == CHASSIS_OK)
+            /* 2. 根据模式决定是否抢权 */
+            if (cached_ctrl_mode == CTRL_MODE_FB_REMOTE)
             {
-                chassis_send_motion_mode(MOTION_MODE_FORWARD); 
+                /* 遥控器控制中：不发 0x400 抢权，等遥控器松手后自动接管 */
+            }
+            else
+            {
+                /* 离线/待机：发送 CAN 夺权使能 + 运动模式 */
+                ret = chassis_send_ctrl_enable(CTRL_MODE_CAN);
+                if (ret == CHASSIS_OK)
+                {
+                    chassis_send_motion_mode(MOTION_MODE_FORWARD);
+                }
             }
 
             /* 既然在抢修通讯期间，就不要高频发包耗电了，休息一会等车子反应过来再战 */
@@ -278,7 +324,7 @@ void chassis_ctrl_task(void *pvParameters)
         {
             /* 车子已经乖乖在手底下听话了，我们显示一点安心的绿色 */
             lcd_show_string(10, 130, 240, 16, 16, "Status: CAN ONLINE   ", GREEN);
-            lcd_show_string(10, 150, 240, 16, 16, "Mode: FORWARD ACTIVE ", BLUE);
+            lcd_show_string(10, 150, 240, 16, 16, "Mode: JETSON CMD     ", BLUE);
         }
 
         /* ---【常规业务：提取最新串口高速缓存】--- */
@@ -305,15 +351,62 @@ void chassis_ctrl_task(void *pvParameters)
             target_vy = 0.0f;
             target_vz = 0.0f;
         }
-        
-        if (target_vx != 0.0f || target_vy != 0.0f || target_vz != 0.0f)
+
+        /* ❗ 故障/急停安全拦截（优先级高于一切运动指令）*/
+        if (chassis_is_estop())
         {
-            lcd_show_string(10, 170, 240, 16, 16, "Ctrl: JETSON CMD", MAGENTA);
+            /* 急停：硬件已断电，仅零速度 + 报警 */
+            target_vx = 0.0f;
+            target_vy = 0.0f;
+            target_vz = 0.0f;
+            lcd_show_string(10, 170, 240, 16, 16, "Ctrl: E-STOP!!! ", RED);
+            fault_start_tick = 0;
+            fault_parked = 0;
+        }
+        else if (chassis_has_fault())
+        {
+            /* 驱动器故障：零速度 → 3秒后切驻车 */
+            target_vx = 0.0f;
+            target_vy = 0.0f;
+            target_vz = 0.0f;
+
+            if (fault_start_tick == 0)
+            {
+                fault_start_tick = HAL_GetTick();  /* 记录故障开始时刻 */
+            }
+
+            if (!fault_parked && (HAL_GetTick() - fault_start_tick > 3000))
+            {
+                /* 故障持续超过3秒，切驻车模式（车轮内八锁死） */
+                chassis_send_motion_mode(MOTION_MODE_PARK);
+                fault_parked = 1;
+                lcd_show_string(10, 170, 240, 16, 16, "Ctrl: PARKED!!! ", RED);
+            }
+            else if (!fault_parked)
+            {
+                lcd_show_string(10, 170, 240, 16, 16, "Ctrl: FAULT!!!  ", RED);
+            }
         }
         else
         {
-            /* 收到全0指令 (刹车) */
-            lcd_show_string(10, 170, 240, 16, 16, "Ctrl: STOP CMD  ", BLUE);
+            /* 无故障：故障恢复处理 + 正常LCD显示 */
+            if (fault_parked)
+            {
+                /* 从驻车恢复：重新切回FORWARD模式 */
+                chassis_send_motion_mode(MOTION_MODE_FORWARD);
+                fault_parked = 0;
+            }
+            fault_start_tick = 0;
+
+            if (target_vx != 0.0f || target_vy != 0.0f || target_vz != 0.0f)
+            {
+                lcd_show_string(10, 170, 240, 16, 16, "Ctrl: JETSON CMD", MAGENTA);
+            }
+            else
+            {
+                /* 收到全0指令 (刹车) */
+                lcd_show_string(10, 170, 240, 16, 16, "Ctrl: STOP CMD  ", BLUE);
+            }
         }
 
         /* 灌递给平滑处理黑盒 (软限幅在函数内部会自动生效) */
@@ -419,7 +512,24 @@ void chassis_rx_task(void *pvParameters)
                 case CAN_ID_WHEEL_ANGLE:    /* 0x102 轮角 (30ms级, 屏蔽单行打印以防刷屏) */
                     break;
 
-                case CAN_ID_FAULT_FEEDBACK:  /* 0x103 故障包 (1000ms级, 屏蔽以防干扰仪表盘) */
+                case CAN_ID_FAULT_FEEDBACK:  /* 0x103 故障包 (1000ms级) */
+                    if (state->fault_status.fault_flag != 0)
+                    {
+                        char lcd_buf[50];
+                        printf("[FAULT] walk=0x%02X steer=0x%02X comm_w=0x%02X comm_s=0x%02X\r\n",
+                                state->fault_status.walk_fault,
+                                state->fault_status.steer_fault,
+                                state->fault_status.walk_comm_fault,
+                                state->fault_status.steer_comm_fault);
+                        snprintf(lcd_buf, sizeof(lcd_buf), "FAULT: W%02X S%02X",
+                                 state->fault_status.walk_fault,
+                                 state->fault_status.steer_fault);
+                        lcd_show_string(10, 290, 240, 16, 16, lcd_buf, RED);
+                    }
+                    else
+                    {
+                        lcd_show_string(10, 290, 240, 16, 16, "FAULT: NONE         ", GREEN);
+                    }
                     break;
 
                 case CAN_ID_MOTION_FEEDBACK: /* 0x104 运动反馈 (20ms级, 触发里程计上报给Jetson) */
@@ -453,14 +563,16 @@ void chassis_rx_task(void *pvParameters)
 }
 
 /**
- * @brief  LED 闪烁任务
+ * @brief  LED 闪烁任务 + IWDG 喂狗
  * @note   每500ms翻转一次LED，指示系统运行
+ *         同时刷新看门狗，如果本任务被高优先级任务饿死，4秒后硬件复位
  */
 void led_task(void *pvParameters)
 {
     while (1)
     {
         LED0_TOGGLE();
+        HAL_IWDG_Refresh(&g_iwdg_handle);  /* 喂狗 */
         vTaskDelay(500);
     }
 }
