@@ -156,6 +156,8 @@ typedef struct
     int16_t vx_fb;                  /* 实际X方向速度 */
     int16_t vy_fb;                  /* 实际Y方向速度 */
     int16_t vz_fb;                  /* 实际旋转角速度 */
+    uint8_t motion_mode;            /* Byte[6]: 运动模式反馈 (P1-6) */
+    uint8_t mode_switch;            /* Byte[7]: 模式切换状态 (0x00完成, 0x01切换中) */
 } chassis_motion_feedback_t;
 
 /**

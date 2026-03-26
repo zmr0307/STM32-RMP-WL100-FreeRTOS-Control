@@ -17,6 +17,9 @@
 #include "./BSP/CHASSIS/chassis_driver.h"
 #include "./BSP/JETSON/jetson_usart.h"
 
+/* 引用 JETSON 驱动中的 ORE 错误计数器 */
+extern uint32_t g_uart3_ore_cnt;
+
 /* FreeRTOS headers */
 #include "FreeRTOS.h"
 #include "task.h"
@@ -29,41 +32,44 @@
 /* ============ Start Task ============ */
 #define START_TASK_PRIO     1
 #define START_STK_SIZE      128
-TaskHandle_t StartTask_Handler;
+static TaskHandle_t StartTask_Handler;
 void start_task(void *pvParameters);
 
 /* ============ Chassis Control Test Task ============ */
 #define CHASSIS_CTRL_TASK_PRIO    2
 #define CHASSIS_CTRL_STK_SIZE     512
-TaskHandle_t Chassis_Ctrl_Task_Handler;
+static TaskHandle_t Chassis_Ctrl_Task_Handler;
 void chassis_ctrl_task(void *pvParameters);
 
 /* ============ Chassis Feedback Processing Task ============ */
 #define CHASSIS_RX_TASK_PRIO      3
 #define CHASSIS_RX_STK_SIZE       512
-TaskHandle_t Chassis_RX_Task_Handler;
+static TaskHandle_t Chassis_RX_Task_Handler;
 void chassis_rx_task(void *pvParameters);
 
 /* ============ LED Blink Task ============ */
 #define LED_TASK_PRIO       1
 #define LED_STK_SIZE        128
-TaskHandle_t LED_Task_Handler;
+static TaskHandle_t LED_Task_Handler;
 void led_task(void *pvParameters);
 
 /* ============ CAN接收消息队列 ============ */
 #define CAN_RX_QUEUE_LEN    10
-QueueHandle_t g_can_rx_queue;
+static QueueHandle_t g_can_rx_queue;
 
 /* ============ Printf 互斥锁 ============ */
 #include <stdarg.h>
 #include <stdio.h>
 #include "semphr.h"
 
-SemaphoreHandle_t g_printf_mutex = NULL;
+static SemaphoreHandle_t g_printf_mutex = NULL;
 
 void safe_printf(const char *format, ...)
 {
-    if (g_printf_mutex != NULL)
+    /* P2: 调度器未启动时跳过信号量操作，避免未定义行为 */
+    uint8_t need_lock = (g_printf_mutex != NULL &&
+                         xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED);
+    if (need_lock)
     {
         xSemaphoreTake(g_printf_mutex, portMAX_DELAY);
     }
@@ -73,7 +79,7 @@ void safe_printf(const char *format, ...)
     vprintf(format, args);
     va_end(args);
 
-    if (g_printf_mutex != NULL)
+    if (need_lock)
     {
         xSemaphoreGive(g_printf_mutex);
     }
@@ -279,7 +285,7 @@ void chassis_ctrl_task(void *pvParameters)
         jetson_data = get_jetson_cmd_ptr();
         
         /* 临界区保护：防止 USART3 中断在读取途中写入新值导致半帧撕裂 */
-        __disable_irq();
+        taskENTER_CRITICAL();
         if (jetson_data->frame_valid)
         {
             /* 有合法新帧到达！取出大端序收到的 1000 倍率整型，除以 1000f 变回实际浮点数交接 */
@@ -290,7 +296,15 @@ void chassis_ctrl_task(void *pvParameters)
             /* 清除标志位，等下一包 */
             jetson_data->frame_valid = 0;
         }
-        __enable_irq();
+        taskEXIT_CRITICAL();
+
+        /* P0: Jetson 通信超时保护 - 500ms无新帧则强制归零，防断线飞车 */
+        if (HAL_GetTick() - jetson_data->last_valid_tick > 500)
+        {
+            target_vx = 0.0f;
+            target_vy = 0.0f;
+            target_vz = 0.0f;
+        }
         
         if (target_vx != 0.0f || target_vy != 0.0f || target_vz != 0.0f)
         {
@@ -391,6 +405,11 @@ void chassis_rx_task(void *pvParameters)
                                 (int)(state->wheel_angle.wheel1_angle * 0.01f), (int)(state->wheel_angle.wheel2_angle * 0.01f),
                                 (int)(state->wheel_angle.wheel3_angle * 0.01f), (int)(state->wheel_angle.wheel4_angle * 0.01f));
                         lcd_show_string(10, 250, 240, 16, 16, lcd_buf, MAGENTA);
+
+                        /* ORE 错误自动恢复计数 (正常运行应为0，偶发不为0说明有电气干扰) */
+                        snprintf(lcd_buf, sizeof(lcd_buf), "UART3 ORE-ERR: %lu", g_uart3_ore_cnt);
+                        lcd_show_string(10, 270, 240, 16, 16, lcd_buf, 
+                                        g_uart3_ore_cnt > 0 ? RED : GREEN);
                     }
                     break;
 

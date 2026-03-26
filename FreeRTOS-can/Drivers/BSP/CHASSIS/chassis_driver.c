@@ -165,6 +165,8 @@ static void decode_motion_feedback(uint8_t *data, chassis_motion_feedback_t *fee
     feedback->vx_fb = (int16_t)((data[0] << 8) | data[1]);
     feedback->vy_fb = (int16_t)((data[2] << 8) | data[3]);
     feedback->vz_fb = (int16_t)((data[4] << 8) | data[5]);
+    feedback->motion_mode = data[6];    /* P1-6: 运动模式反馈 */
+    feedback->mode_switch = data[7];    /* P1-6: 模式切换状态 */
 }
 
 /**

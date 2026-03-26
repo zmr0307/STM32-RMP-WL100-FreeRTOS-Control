@@ -23,6 +23,7 @@
 #include "stm32f4xx_it.h"
 #include "stm32f4xx_hal.h"
 #include "./SYSTEM/sys/sys.h"
+#include "./BSP/LED/led.h"
 
 /** @addtogroup STM32F4xx_HAL_Examples
   * @{
@@ -60,9 +61,11 @@ void NMI_Handler(void)
   */
 void HardFault_Handler(void)
 {
-  /* Go to infinite loop when Hard Fault exception occurs */
+  /* HardFault 诊断指示: LED1 快闪(~200ms), 与心跳 LED0(500ms) 明显区分 */
   while (1)
   {
+    LED1_TOGGLE();
+    for (volatile uint32_t i = 0; i < 200000; i++);
   }
 }
 
@@ -73,9 +76,11 @@ void HardFault_Handler(void)
   */
 void MemManage_Handler(void)
 {
-  /* Go to infinite loop when Memory Manage exception occurs */
+  /* P1: MemManage 诊断: LED0+LED1 同步快闪(~100ms), 区别于 HardFault 的 LED1 独闪(~200ms) */
   while (1)
   {
+    LED0_TOGGLE(); LED1_TOGGLE();
+    for (volatile uint32_t i = 0; i < 100000; i++);
   }
 }
 
@@ -86,9 +91,11 @@ void MemManage_Handler(void)
   */
 void BusFault_Handler(void)
 {
-  /* Go to infinite loop when Bus Fault exception occurs */
+  /* P1: BusFault 诊断: LED0+LED1 同步快闪 */
   while (1)
   {
+    LED0_TOGGLE(); LED1_TOGGLE();
+    for (volatile uint32_t i = 0; i < 100000; i++);
   }
 }
 
@@ -99,9 +106,11 @@ void BusFault_Handler(void)
   */
 void UsageFault_Handler(void)
 {
-  /* Go to infinite loop when Usage Fault exception occurs */
+  /* P1: UsageFault 诊断: LED0+LED1 同步快闪 */
   while (1)
   {
+    LED0_TOGGLE(); LED1_TOGGLE();
+    for (volatile uint32_t i = 0; i < 100000; i++);
   }
 }
 

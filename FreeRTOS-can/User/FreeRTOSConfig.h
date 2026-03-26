@@ -4,6 +4,7 @@
 /* 头文件 */
 #include "./SYSTEM/sys/sys.h"
 #include "./SYSTEM/usart/usart.h"
+#include "./BSP/LED/led.h"
 #include <stdint.h>
 
 extern uint32_t SystemCoreClock;
@@ -106,8 +107,11 @@ extern uint32_t FreeRTOSRunTimeTicks;
 #define xPortPendSVHandler                              PendSV_Handler
 #define vPortSVCHandler                                 SVC_Handler
 
-/* 断言 */
-#define vAssertCalled(char, int) printf("Error: %s, %d\r\n", char, int)
+/* 断言: 纯硬件指示, 不依赖 printf/信号量, 任何上下文(含中断)均安全 */
+#define vAssertCalled(char, int) do { \
+    __disable_irq(); \
+    while(1) { LED0_TOGGLE(); for(volatile uint32_t _i=0;_i<500000;_i++); } \
+} while(0)
 #define configASSERT( x ) if( ( x ) == 0 ) vAssertCalled( __FILE__, __LINE__ )
 
 /* FreeRTOS MPU 特殊定义 */

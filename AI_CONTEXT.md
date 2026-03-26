@@ -21,7 +21,7 @@
 | 硬件 | 型号/参数 |
 |------|-----------|
 | 主控芯片 | STM32F407ZGT6（正点原子探索者开发板） |
-| 系统时钟 | 168MHz 主频（HSE 25MHz × PLL 336/8/2） |
+| 系统时钟 | 168MHz 主频（HSE 8MHz × PLL 336/8/2） |
 | 底盘型号 | RMP-WL100 四驱四转向全向移动底座 |
 | RTOS | FreeRTOS（1ms 节拍，configTICK_RATE_HZ=1000） |
 
@@ -97,7 +97,7 @@
 | `0x101` | 四轮速度 | 30ms |
 | `0x102` | 四轮角度 | 30ms |
 | `0x103` | 故障定位 | 1000ms |
-| `0x104` | 运动状态反馈 Vx/Vy/Vz | 20ms |
+| `0x104` | 运动状态反馈 Vx/Vy/Vz + 运动模式 | 20ms |
 
 #### ⚠️ 极重要防坑点
 
@@ -140,7 +140,8 @@
      - continue 跳过本轮控制
   3. 若在线且模式正确:
      - LCD 显示绿色 CAN ONLINE
-     - __disable_irq() 临界区读取 Jetson 指令（防半帧撕裂）
+     - taskENTER_CRITICAL() 临界区读取 Jetson 指令（防半帧撕裂）
+     - ⚡ Jetson 通信超时保护: 500ms 无新帧则强制速度归零（防断线飞车）
      - 发送 0x402 运动控制帧
 ```
 
@@ -163,8 +164,13 @@
 ## 4. 重要安全机制
 
 ### 4.1 竞态临界区保护
-- `chassis_ctrl_task` 读取 `g_jetson_cmd` 时，用 `__disable_irq()/__enable_irq()` 包裹
+- `chassis_ctrl_task` 读取 `g_jetson_cmd` 时，用 `taskENTER_CRITICAL()/taskEXIT_CRITICAL()` 包裹
 - 原因：USART3 中断会在任意时刻写入 g_jetson_cmd，若不保护会发生"半帧撕裂"（Vx 读旧值，Vy 读新值）
+
+### 4.5 Jetson 断线超时归零保护 ⚡
+- `jetson_usart.c` 每次解码成功记录 `HAL_GetTick()` 时间戳至 `g_jetson_cmd.last_valid_tick`
+- `chassis_ctrl_task` 每轮检测：若 `HAL_GetTick() - last_valid_tick > 500` (500ms)，强制 `target_vx/vy/vz = 0`
+- 系统上电时 `last_valid_tick = 0`，立刻满足超时条件 → 底盘静止等待第一帧（安全行为）
 
 ### 4.2 printf 互斥保护
 - 定义了 `safe_printf()` 函数，内部使用 FreeRTOS 互斥锁
