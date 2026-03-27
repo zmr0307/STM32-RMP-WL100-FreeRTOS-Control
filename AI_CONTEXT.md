@@ -10,8 +10,9 @@
 ## 0. 极简当前状态摘要 (TL;DR)
 
 - **阶段**: STM32 固件端**工程化稳定性增强阶段**完成，准备室内巡检部署。
-- **已完成**: CAN 双向通信 ✅ | 自愈重连机制 ✅ | USART3 串口接收引擎 ✅ | 实车热插拔测试 ✅ | Jetson 下发控制 ✅ | 里程计高速上报 ✅ | **故障检测与紧急停车** ✅ | **IWDG 硬件看门狗** ✅ | **遥控器抢权感知** ✅ | **CAN Bus-Off 自动恢复** ✅ | **USART3 竞态修复** ✅ | **状态缓存快照** ✅
-- **当前测试方式**: STM32 与底盘 CAN 正常通信，USART3 50Hz 上报里程计给 Jetson，具备完整的故障安全拦截和遥控器模式感知。
+- **已完成**: CAN 双向通信 ✅ | 自愈重连机制 ✅ | USART3 串口接收引擎 ✅ | 实车热插拔测试 ✅ | Jetson 下发控制 ✅ | 里程计高速上报 ✅ | **故障检测与紧急停车** ✅ | **IWDG 硬件看门狗** ✅ | **遥控器抢权感知** ✅ | **CAN Bus-Off 自动恢复** ✅ | **USART3 任务侧解析** ✅ | **LCD 互斥与节流** ✅ | **状态缓存快照** ✅
+- **当前测试方式**: STM32 与底盘 CAN 正常通信，USART3 50Hz 上报里程计给 Jetson；Jetson 下行控制采用“单槽暂存邮箱 + 最新值覆盖”语义，具备完整的故障安全拦截和遥控器模式感知。
+- **当前运行入口**: `main.c` 中 `USE_CHASSIS_TEST = 1`，实际执行 `chassis_test_demo()`；`freertos_demo()` 为遗留演示入口。
 - **下一步**: 开发 Jetson 端 ROS2 里程计接收节点；电池状态上报 (TYPE=0x02)。
 
 ---
@@ -39,9 +40,10 @@
 - TX: **PB10**（接 Jetson RX）
 - RX: **PB11**（接 Jetson TX）
 - 波特率: **115200**
-- 接收机制: **IDLE 空闲中断 + DMA 循环接收**
+- 接收机制: **IDLE 空闲中断 + DMA 循环接收 + 单槽暂存邮箱 + 任务上下文解析**
 - DMA 通道: **DMA1_Stream1_Channel4**（F407 硬件固定，不可改）
 - 中断优先级: 6（位于 FreeRTOS 安全线 5 之下）
+- 消费语义: **只保证最新控制帧有效，不保证逐帧可靠消费**；若任务来不及消费，新的数据块会覆盖旧块，并累计 `g_jetson_stage_overwrite_count`
 - **竞态保护**: `jetson_report_odom()` 阻塞发送期间禁用 IDLE 中断，防止 ISR 竞争 HAL Lock
 
 ### USART1（调试打印）
@@ -51,6 +53,7 @@
 ### LCD（实时仪表盘）
 - 接口: FSMC 并行总线
 - 用途: 显示底盘在线状态、控制模式、故障状态、电池信息、轮速
+- 访问约束: 任务态刷屏统一走 `lcd_safe_show_string()` 互斥入口；主状态行（130/150/170）使用 `lcd_update_cached_line()` 做状态变化立即刷新 + 200ms 保底节流
 
 ---
 
@@ -87,7 +90,7 @@
 | CAN ID | 用途 | 重要说明 |
 |--------|------|----------|
 | `0x400` | 控制模式使能 | data[0]=`0x01` 表示请求进入 CAN 控制模式 |
-| `0x401` | 运动模式选择 | data[0]=`0x02` (FORWARD) / `0x04` (PARK驻车) |
+| `0x401` | 运动模式选择 | data[0]=`0x02` (FORWARD) / `0x10` (PARK驻车) |
 | `0x402` | 运动控制（最常用）| Vx/Vy/Vz，大端 × 1000，限幅 ±2.0 |
 
 #### 接收帧（底盘 → STM32）
@@ -137,24 +140,27 @@
 
 ```
 每 20ms 循环一次:
-  0. 缓存状态快照: cached_online + cached_ctrl_mode（防抢占不一致）
-  1. 检查 cached_online 和 cached_ctrl_mode
-  2. 若离线或模式错误:
+  0. 先调用 jetson_process_staged_rx()，在任务上下文处理 USART3 暂存邮箱
+  1. 缓存状态快照: cached_online + cached_ctrl_mode（防抢占不一致）
+  2. 检查 cached_online 和 cached_ctrl_mode
+  3. 若离线或模式错误:
      - 强制 target_vx/vy/vz = 0
-     - LCD 显示:
+     - LCD 状态行(130/150/170)通过缓存更新:
        · 离线 → "Mode: OFFLINE" (红)
        · 遥控器(0x01) → "Mode: REMOTE CTRL" (黄) ← 不发0x400抢权
-       · 待机(0x00) → "Mode: STANDBY" (红) ← 发0x400+0x401抢权
-     - vTaskDelay(500) + continue
-  3. 若在线且 CAN 控制模式:
+       · 待机(0x00) → "Mode: STANDBY" (红) ← 每100ms发0x400+0x401抢权
+     - 抢权阶段每轮发送零速 0x402，缩短接管成功后的起控迟滞
+     - vTaskDelay(20) + continue
+  4. 若在线且 CAN 控制模式:
      - LCD 显示 "Mode: JETSON CMD" (蓝)
-     - 临界区读取 Jetson 指令
+     - 读取最新 Jetson 控制容器；若 frame_valid=1，则提取最新 vx/vy/vz 后清标志
      - Jetson 500ms 超时归零保护
      - ❗ 故障/急停安全拦截:
        · 急停(0x100 bit0) → 零速度 + "E-STOP!!!" (红)
        · 驱动器故障(0x103) → 零速度, 3秒后切 PARK 驻车
        · 故障恢复 → 自动切回 FORWARD 模式
      - 发送 0x402 运动控制帧
+     - 130/150/170 三行通过缓存逻辑刷新（状态变化立即更新，稳定态 200ms 保底刷新）
 ```
 
 ### chassis_rx_task 详解
@@ -164,11 +170,11 @@
   xQueueReceive(g_can_rx_queue, &rx_data, pdMS_TO_TICKS(200))
   if 收到数据:
     chassis_process_feedback() 解码存入 g_chassis_state
-    0x100 到了: 打印串口仪表盘 + LCD 电池/轮速/UART错误计数
+    0x100 到了: 打印串口仪表盘 + LCD 电池/轮速/角度/诊断计数 O:D:J
     0x103 到了: LCD 显示故障状态 (绿=NONE / 红=故障码)
     0x104 到了: 调用 jetson_report_odom() 上报里程计 (50Hz)
   无论是否收到数据:
-    每 200ms 强制刷新 LCD 在线状态
+    每 200ms 最多刷新一次 LCD 在线状态(190行)
 ```
 
 ---
@@ -219,12 +225,16 @@
 - 500ms 无新帧 → 强制速度归零（防断线飞车）
 - 上电时 `last_valid_tick = 0` → 立刻满足超时 → 底盘静止等待
 
-### 4.8 竞态临界区保护
-- 读取 `g_jetson_cmd` 用 `taskENTER_CRITICAL()/taskEXIT_CRITICAL()`
-- 防止 USART3 中断写入导致半帧撕裂
+### 4.8 Jetson 单槽暂存邮箱 + 任务侧解析 🟡
+- `USART3_IRQHandler()` 只做三件事：计算本次接收长度、把 DMA 缓冲区内容拷贝到 `g_jetson_stage_buf`、重启 DMA
+- `jetson_process_staged_rx()` 在任务上下文短暂关中断，把暂存邮箱拷贝到局部缓冲后再做协议解析
+- 若 ISR 到来时 `g_jetson_stage_pending != 0`，则认为旧块未消费，执行**最新值覆盖旧值**并累计 `g_jetson_stage_overwrite_count`
+- 该设计适用于连续速度控制；如果未来协议引入事件型命令，再升级为队列或环形缓冲
 
-### 4.9 printf 互斥保护
+### 4.9 printf / LCD 互斥与节流保护 🟡
 - `safe_printf()` + FreeRTOS 互斥锁，多任务并发打印安全
+- 所有任务态 LCD 刷新统一走 `lcd_safe_show_string()`，避免多任务抢占刷屏导致总线竞争
+- 130/150/170 主状态行通过 `lcd_update_cached_line()` 做 200ms 保底节流，减少无效刷屏和 CPU 消耗
 
 ### 4.10 栈溢出检测
 - `configCHECK_FOR_STACK_OVERFLOW = 2`（水印法）
@@ -247,7 +257,7 @@
 | 210 | 电池信息 | rx_task(0x100) | 蓝色，格式: BAT:25.2V 85% -570mA |
 | 230 | 四轮速度 | rx_task(0x100) | 品红，格式: Spd: W1 W2 W3 W4 (mm/s) |
 | 250 | 四轮角度 | rx_task(0x100) | 品红，格式: Ang: A1 A2 A3 A4 (deg) |
-| 270 | UART3错误 | rx_task(0x100) | 绿=0 / 红>0，ORE 错误计数 |
+| 270 | 诊断计数 | rx_task(0x100) | 格式: `O:UART3_ORE D:CAN_DROP J:JETSON_OVR`；全 0 为绿，任一非 0 为红 |
 | 290 | 故障状态 | rx_task(0x103) | 绿=NONE / 红=W故障码 S故障码 |
 
 ---
@@ -260,9 +270,10 @@
 | 电流小端解码 | 显示 -143370mA | 误信原厂文档小端说明 | 大端：(data[6]<<8)&#124;data[7]，实测-560mA ✅ |
 | CAN 100Hz 超速发包 | CANERR 报错 | 底盘 MCU 邮箱冲爆 | vTaskDelay(20) 限 50Hz |
 | 断电 LCD 不更新 | LCD 残留绿色假在线 | xQueueReceive 用 portMAX_DELAY 永久阻塞 | 改为 pdMS_TO_TICKS(200) 超时 |
-| 半帧撕裂风险 | 偶发抽搐抖动 | USART3 中断与主任务无保护并发 | taskENTER_CRITICAL 临界区 |
+| USART3 ISR 内直接解析 | 中断时间拉长、共享缓冲易撕裂 | 在 ISR 中做完整协议解析，并直接复用 DMA 接收缓冲区 | ISR 只搬运到 stage buf，`jetson_process_staged_rx()` 在任务侧解析 |
 | HAL 句柄竞态 | 长时间运行 USART3 卡死 | 阻塞发送与 IDLE 中断竞争 Lock | 发送期间禁用 IDLE 中断 |
 | 遥控器打架 | 底盘来回抖动 | STM32 和遥控器反复抢权 | 识别遥控器模式时不发 0x400 |
+| LCD 多任务抢占刷屏 | 花屏、错位或状态行高频抖动 | ctrl_task 与 rx_task 并发刷 LCD 且无统一入口 | 统一走 `lcd_safe_show_string()`，主状态行再加缓存节流 |
 
 ---
 
@@ -287,7 +298,7 @@
 
 | # | 项目 | 影响 |
 |---|------|------|
-| 1 | CAN 队列深度仅 10 | 当前实测够用，未来增加功能需观察 |
+| 1 | Jetson 接收为单槽邮箱语义 | 当前对连续速度控制是合理取舍；若未来加入事件型命令，需要升级为队列或环形缓冲 |
 | 2 | btim.c 与 gtim.c 定时器回调冲突 | gtim.c 未编译，当前无影响；若未来使用需重构 |
 | 3 | HAL_GetTick 49.7天溢出 | 无符号减法天然处理，室内巡检不影响 |
-| 4 | chassis_ctrl_task LCD 刷新 50Hz | 性能浪费，可降至 5Hz 节省 CPU |
+| 4 | 190 行在线状态未并入缓存节流 | 当前由 `xQueueReceive(..., 200ms)` 自然限频，已够用；若后续要统一风格可再收口 |

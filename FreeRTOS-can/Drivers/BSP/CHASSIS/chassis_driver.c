@@ -194,6 +194,8 @@ static void decode_fault_status(uint8_t *data, chassis_fault_status_t *fault)
  */
 chassis_err_e chassis_driver_init(uint8_t test_mode)
 {
+    uint8_t can_ret;
+
     /* 清空底盘状态 */
     memset(&g_chassis_state, 0, sizeof(chassis_state_t));
 
@@ -202,13 +204,18 @@ chassis_err_e chassis_driver_init(uint8_t test_mode)
     {
         /* 回环测试模式(自己发自己收,用于调试) */
         /* 波特率=42M/(6*(1+8+5))=500Kbps */
-        can_init(CAN_SJW_1TQ, CAN_BS2_5TQ, CAN_BS1_8TQ, 6, CAN_MODE_LOOPBACK);
+        can_ret = can_init(CAN_SJW_1TQ, CAN_BS2_5TQ, CAN_BS1_8TQ, 6, CAN_MODE_LOOPBACK);
     }
     else
     {
         /* 正常模式(连接底盘) */
         /* 波特率=42M/(6*(1+8+5))=500Kbps */
-        can_init(CAN_SJW_1TQ, CAN_BS2_5TQ, CAN_BS1_8TQ, 6, CAN_MODE_NORMAL);
+        can_ret = can_init(CAN_SJW_1TQ, CAN_BS2_5TQ, CAN_BS1_8TQ, 6, CAN_MODE_NORMAL);
+    }
+
+    if (can_ret != 0)
+    {
+        return CHASSIS_ERR_CAN;
     }
 
     return CHASSIS_OK;

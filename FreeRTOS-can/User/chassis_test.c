@@ -1,7 +1,7 @@
 /**
  ****************************************************************************************************
  * @file        chassis_test.c
- * @brief       Chassis driver test program (loopback mode)
+ * @brief       Chassis driver test program (normal CAN mode)
  * @note        Test platform: Alientek Explorer F407 board
  *              Test content:
  *              1. Encoding test: Send control commands, verify CAN data encoding
@@ -16,6 +16,7 @@
 #include "./BSP/LCD/lcd.h"
 #include "./BSP/CHASSIS/chassis_driver.h"
 #include "./BSP/JETSON/jetson_usart.h"
+#include <string.h>
 
 /* 引用 JETSON 驱动中的 ORE 错误计数器 */
 extern uint32_t g_uart3_ore_cnt;
@@ -76,15 +77,26 @@ static TaskHandle_t LED_Task_Handler;
 void led_task(void *pvParameters);
 
 /* ============ CAN接收消息队列 ============ */
-#define CAN_RX_QUEUE_LEN    10
+#define CAN_RX_QUEUE_LEN    32
 static QueueHandle_t g_can_rx_queue;
 
-/* ============ Printf 互斥锁 ============ */
+/* ============ Printf / LCD 互斥锁 ============ */
 #include <stdarg.h>
 #include <stdio.h>
 #include "semphr.h"
 
 static SemaphoreHandle_t g_printf_mutex = NULL;
+static SemaphoreHandle_t g_lcd_mutex = NULL;
+
+typedef struct
+{
+    char text[24];
+    uint16_t color;
+    uint32_t last_tick;
+    uint8_t valid;
+} lcd_line_cache_t;
+
+#define LCD_CTRL_REFRESH_MS  200U
 
 void safe_printf(const char *format, ...)
 {
@@ -107,6 +119,45 @@ void safe_printf(const char *format, ...)
     }
 }
 #define printf(...) safe_printf(__VA_ARGS__)
+
+static void lcd_safe_show_string(uint16_t x, uint16_t y, uint16_t width, uint16_t height,
+                                 uint8_t size, char *text, uint16_t color)
+{
+    uint8_t need_lock = (g_lcd_mutex != NULL &&
+                         xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED);
+
+    if (need_lock)
+    {
+        xSemaphoreTake(g_lcd_mutex, portMAX_DELAY);
+    }
+
+    lcd_show_string(x, y, width, height, size, text, color);
+
+    if (need_lock)
+    {
+        xSemaphoreGive(g_lcd_mutex);
+    }
+}
+
+static void lcd_update_cached_line(uint16_t x, uint16_t y, uint16_t width, uint16_t height,
+                                   uint8_t size, const char *text, uint16_t color,
+                                   lcd_line_cache_t *cache)
+{
+    uint32_t now = HAL_GetTick();
+    uint8_t changed = (!cache->valid ||
+                       cache->color != color ||
+                       strcmp(cache->text, text) != 0);
+
+    if (changed || (now - cache->last_tick >= LCD_CTRL_REFRESH_MS))
+    {
+        lcd_safe_show_string(x, y, width, height, size, (char *)text, color);
+        strncpy(cache->text, text, sizeof(cache->text) - 1);
+        cache->text[sizeof(cache->text) - 1] = '\0';
+        cache->color = color;
+        cache->last_tick = now;
+        cache->valid = 1;
+    }
+}
 
 /******************************************************************************************************/
 /*                              FreeRTOS 栈溢出报警钩子                                               */
@@ -138,14 +189,19 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
  */
 void chassis_test_demo(void)
 {
-    /* 创建 printf 的防抢占互斥锁 */
+    /* 创建 printf / LCD 的防抢占互斥锁 */
     g_printf_mutex = xSemaphoreCreateMutex();
+    g_lcd_mutex = xSemaphoreCreateMutex();
+    if (g_printf_mutex == NULL || g_lcd_mutex == NULL)
+    {
+        while (1);
+    }
 
     /* LCD 显示标题 */
-    lcd_show_string(10, 10, 220, 32, 32, "STM32", RED);
-    lcd_show_string(10, 47, 220, 24, 24, "Chassis Test", RED);
-    lcd_show_string(10, 76, 220, 16, 16, "ATOM@ALIENTEK", RED);
-    lcd_show_string(10, 100, 220, 16, 16, "CAN NORMAL Mode", BLUE);
+    lcd_safe_show_string(10, 10, 220, 32, 32, "STM32", RED);
+    lcd_safe_show_string(10, 47, 220, 24, 24, "Chassis Test", RED);
+    lcd_safe_show_string(10, 76, 220, 16, 16, "ATOM@ALIENTEK", RED);
+    lcd_safe_show_string(10, 100, 220, 16, 16, "CAN NORMAL Mode", BLUE);
 
     printf("\r\n========================================\r\n");
     printf("Chassis Driver Test Program Start\r\n");
@@ -242,6 +298,15 @@ void chassis_ctrl_task(void *pvParameters)
     chassis_err_e ret;
     chassis_motion_ctrl_t motion_cmd;
     jetson_ctrl_cmd_t *jetson_data;
+    const char *status_text = "Status: INIT         ";
+    const char *mode_text = "Mode: INIT           ";
+    const char *ctrl_text = "Ctrl: INIT           ";
+    uint16_t status_color = BLUE;
+    uint16_t mode_color = BLUE;
+    uint16_t ctrl_color = BLUE;
+    lcd_line_cache_t status_cache = {0};
+    lcd_line_cache_t mode_cache = {0};
+    lcd_line_cache_t ctrl_cache = {0};
 
     /* 初始锁定发送速度为 0 */
     float target_vx = 0.0f;
@@ -251,16 +316,19 @@ void chassis_ctrl_task(void *pvParameters)
     /* 故障安全拦截变量 */
     uint32_t fault_start_tick = 0;  /* 驱动器故障开始时间戳 */
     uint8_t  fault_parked = 0;     /* 是否已切入驻车模式 */
+    uint32_t last_recover_cmd_tick = 0; /* 上次发送接管保活命令的时间 */
 
     printf("\r\n>>> Chassis JETSON-TELEOP Ready <<<\r\n");
 
     vTaskDelay(1000);  
 
-    /* ========== Test3: OMNI RealTime Loop (10ms高速周期) + 自愈重连系统 ========== */
+    /* ========== Test3: OMNI RealTime Loop (20ms/50Hz周期) + 自愈重连系统 ========== */
     printf("\r\n[Test3] Starting Realtime Serial Loop with Self-Healing...\r\n");
 
     while (1)
     {
+        jetson_process_staged_rx();
+
         /* 缓存底盘状态快照, 避免同一轮循环内多次读取被抢占更新导致不一致 */
         uint8_t cached_online = chassis_is_online();
         uint8_t cached_ctrl_mode = chassis_get_state()->system_status.ctrl_mode;
@@ -285,53 +353,79 @@ void chassis_ctrl_task(void *pvParameters)
 
             if (cached_online == 0)
             {
-                lcd_show_string(10, 130, 240, 16, 16, "Status: OFFLINE...     ", RED);
-                lcd_show_string(10, 150, 240, 16, 16, "Mode: OFFLINE        ", RED);
+                status_text = "Status: OFFLINE...   ";
+                mode_text = "Mode: OFFLINE        ";
+                ctrl_text = "Ctrl: HOLD ZERO  ";
+                status_color = RED;
+                mode_color = RED;
+                ctrl_color = BLUE;
             }
             else if (cached_ctrl_mode == CTRL_MODE_FB_REMOTE)
             {
-                lcd_show_string(10, 130, 240, 16, 16, "Status: CAN ONLINE   ", GREEN);
-                lcd_show_string(10, 150, 240, 16, 16, "Mode: REMOTE CTRL   ", YELLOW);
+                status_text = "Status: CAN ONLINE   ";
+                mode_text = "Mode: REMOTE CTRL   ";
+                ctrl_text = "Ctrl: HOLD ZERO  ";
+                status_color = GREEN;
+                mode_color = YELLOW;
+                ctrl_color = BLUE;
             }
             else
             {
-                lcd_show_string(10, 130, 240, 16, 16, "Status: Reconnecting...", MAGENTA);
-                lcd_show_string(10, 150, 240, 16, 16, "Mode: STANDBY        ", RED);
+                status_text = "Status: Reconnect... ";
+                mode_text = "Mode: STANDBY        ";
+                ctrl_text = "Ctrl: HOLD ZERO  ";
+                status_color = MAGENTA;
+                mode_color = RED;
+                ctrl_color = BLUE;
             }
 
+            lcd_update_cached_line(10, 130, 240, 16, 16, status_text, status_color, &status_cache);
+            lcd_update_cached_line(10, 150, 240, 16, 16, mode_text, mode_color, &mode_cache);
+            lcd_update_cached_line(10, 170, 240, 16, 16, ctrl_text, ctrl_color, &ctrl_cache);
+
             /* 2. 根据模式决定是否抢权 */
-            if (cached_ctrl_mode == CTRL_MODE_FB_REMOTE)
+            if (cached_online != 0 && cached_ctrl_mode == CTRL_MODE_FB_REMOTE)
             {
                 /* 遥控器控制中：不发 0x400 抢权，等遥控器松手后自动接管 */
             }
             else
             {
-                /* 离线/待机：发送 CAN 夺权使能 + 运动模式 */
-                ret = chassis_send_ctrl_enable(CTRL_MODE_CAN);
-                if (ret == CHASSIS_OK)
+                /* 离线/待机：周期性发送 CAN 夺权使能 + 运动模式 */
+                if (HAL_GetTick() - last_recover_cmd_tick >= 100)
                 {
-                    chassis_send_motion_mode(MOTION_MODE_FORWARD);
+                    ret = chassis_send_ctrl_enable(CTRL_MODE_CAN);
+                    if (ret == CHASSIS_OK)
+                    {
+                        chassis_send_motion_mode(MOTION_MODE_FORWARD);
+                    }
+                    last_recover_cmd_tick = HAL_GetTick();
                 }
+
+                /* 抢权阶段持续发送零速控制帧，缩短接管确认后的起控迟滞 */
+                motion_cmd.vx = 0.0f;
+                motion_cmd.vy = 0.0f;
+                motion_cmd.vz = 0.0f;
+                chassis_send_motion_ctrl(&motion_cmd);
             }
 
-            /* 既然在抢修通讯期间，就不要高频发包耗电了，休息一会等车子反应过来再战 */
-            vTaskDelay(500);
+            /* 抢修期保持 20ms 级轮询，保证接管和心跳恢复足够快 */
+            vTaskDelay(20);
             
             /* 抢修期跳过后续所有打控制指令的操作，直接下一把 */
             continue; 
         }
         else
         {
-            /* 车子已经乖乖在手底下听话了，我们显示一点安心的绿色 */
-            lcd_show_string(10, 130, 240, 16, 16, "Status: CAN ONLINE   ", GREEN);
-            lcd_show_string(10, 150, 240, 16, 16, "Mode: JETSON CMD     ", BLUE);
+            last_recover_cmd_tick = 0;
+
+            status_text = "Status: CAN ONLINE   ";
+            mode_text = "Mode: JETSON CMD     ";
+            status_color = GREEN;
+            mode_color = BLUE;
         }
 
         /* ---【常规业务：提取最新串口高速缓存】--- */
         jetson_data = get_jetson_cmd_ptr();
-        
-        /* 临界区保护：防止 USART3 中断在读取途中写入新值导致半帧撕裂 */
-        taskENTER_CRITICAL();
         if (jetson_data->frame_valid)
         {
             /* 有合法新帧到达！取出大端序收到的 1000 倍率整型，除以 1000f 变回实际浮点数交接 */
@@ -342,7 +436,6 @@ void chassis_ctrl_task(void *pvParameters)
             /* 清除标志位，等下一包 */
             jetson_data->frame_valid = 0;
         }
-        taskEXIT_CRITICAL();
 
         /* P0: Jetson 通信超时保护 - 500ms无新帧则强制归零，防断线飞车 */
         if (HAL_GetTick() - jetson_data->last_valid_tick > 500)
@@ -359,7 +452,8 @@ void chassis_ctrl_task(void *pvParameters)
             target_vx = 0.0f;
             target_vy = 0.0f;
             target_vz = 0.0f;
-            lcd_show_string(10, 170, 240, 16, 16, "Ctrl: E-STOP!!! ", RED);
+            ctrl_text = "Ctrl: E-STOP!!! ";
+            ctrl_color = RED;
             fault_start_tick = 0;
             fault_parked = 0;
         }
@@ -380,11 +474,13 @@ void chassis_ctrl_task(void *pvParameters)
                 /* 故障持续超过3秒，切驻车模式（车轮内八锁死） */
                 chassis_send_motion_mode(MOTION_MODE_PARK);
                 fault_parked = 1;
-                lcd_show_string(10, 170, 240, 16, 16, "Ctrl: PARKED!!! ", RED);
+                ctrl_text = "Ctrl: PARKED!!! ";
+                ctrl_color = RED;
             }
             else if (!fault_parked)
             {
-                lcd_show_string(10, 170, 240, 16, 16, "Ctrl: FAULT!!!  ", RED);
+                ctrl_text = "Ctrl: FAULT!!!  ";
+                ctrl_color = RED;
             }
         }
         else
@@ -400,12 +496,14 @@ void chassis_ctrl_task(void *pvParameters)
 
             if (target_vx != 0.0f || target_vy != 0.0f || target_vz != 0.0f)
             {
-                lcd_show_string(10, 170, 240, 16, 16, "Ctrl: JETSON CMD", MAGENTA);
+                ctrl_text = "Ctrl: JETSON CMD";
+                ctrl_color = MAGENTA;
             }
             else
             {
                 /* 收到全0指令 (刹车) */
-                lcd_show_string(10, 170, 240, 16, 16, "Ctrl: STOP CMD  ", BLUE);
+                ctrl_text = "Ctrl: STOP CMD  ";
+                ctrl_color = BLUE;
             }
         }
 
@@ -418,8 +516,13 @@ void chassis_ctrl_task(void *pvParameters)
 
         if (err != CHASSIS_OK)
         {
-            lcd_show_string(10, 170, 240, 16, 16, "Ctrl: CANERR    ", RED);
+            ctrl_text = "Ctrl: CANERR    ";
+            ctrl_color = RED;
         }
+
+        lcd_update_cached_line(10, 130, 240, 16, 16, status_text, status_color, &status_cache);
+        lcd_update_cached_line(10, 150, 240, 16, 16, mode_text, mode_color, &mode_cache);
+        lcd_update_cached_line(10, 170, 240, 16, 16, ctrl_text, ctrl_color, &ctrl_cache);
 
         /* 降频发包以维持底盘连贯动作响应，50Hz防爆箱 (20ms级较优) */
         vTaskDelay(20);  
@@ -459,6 +562,8 @@ void chassis_rx_task(void *pvParameters)
                 case CAN_ID_SYSTEM_STATUS:  /* 借用 0x100 每 1000ms才触发一次的特性，实现整洁看板打印与LCD刷屏 */
                     {
                         char lcd_buf[50];
+                        uint32_t can_drop_count = can_get_rx_drop_count();
+                        uint32_t jetson_stage_overwrite_count = jetson_get_stage_overwrite_count();
                         
                         /* 1. 串口打印 */
                         printf("\r\n--- CHASSIS STATUS DASHBOARD ---\r\n");
@@ -480,6 +585,10 @@ void chassis_rx_task(void *pvParameters)
                                 state->wheel_angle.wheel2_angle * 0.01f,
                                 state->wheel_angle.wheel3_angle * 0.01f,
                                 state->wheel_angle.wheel4_angle * 0.01f);
+                        printf("Diag    : UART3_ORE=%lu | CAN_DROP=%lu | JETSON_OVR=%lu\r\n",
+                                g_uart3_ore_cnt,
+                                can_drop_count,
+                                jetson_stage_overwrite_count);
                         printf("--------------------------------\r\n");
                         
                         /* 2. LCD 屏幕显示刷新 (坐标 10, 210 往下排列) */
@@ -487,22 +596,23 @@ void chassis_rx_task(void *pvParameters)
                                 state->system_status.battery_voltage * 10 / 1000.0f, 
                                 state->system_status.soc,
                                 state->system_status.battery_current * 10);
-                        lcd_show_string(10, 210, 240, 16, 16, lcd_buf, BLUE);
+                        lcd_safe_show_string(10, 210, 240, 16, 16, lcd_buf, BLUE);
                         
                         snprintf(lcd_buf, sizeof(lcd_buf), "Spd: %4d %4d %4d %4d", 
                                 state->wheel_speed.wheel1_speed, state->wheel_speed.wheel2_speed,
                                 state->wheel_speed.wheel3_speed, state->wheel_speed.wheel4_speed);
-                        lcd_show_string(10, 230, 240, 16, 16, lcd_buf, MAGENTA);
+                        lcd_safe_show_string(10, 230, 240, 16, 16, lcd_buf, MAGENTA);
                         
                         snprintf(lcd_buf, sizeof(lcd_buf), "Ang: %3d  %3d  %3d  %3d", 
                                 (int)(state->wheel_angle.wheel1_angle * 0.01f), (int)(state->wheel_angle.wheel2_angle * 0.01f),
                                 (int)(state->wheel_angle.wheel3_angle * 0.01f), (int)(state->wheel_angle.wheel4_angle * 0.01f));
-                        lcd_show_string(10, 250, 240, 16, 16, lcd_buf, MAGENTA);
+                        lcd_safe_show_string(10, 250, 240, 16, 16, lcd_buf, MAGENTA);
 
-                        /* ORE 错误自动恢复计数 (正常运行应为0，偶发不为0说明有电气干扰) */
-                        snprintf(lcd_buf, sizeof(lcd_buf), "UART3 ORE-ERR: %lu", g_uart3_ore_cnt);
-                        lcd_show_string(10, 270, 240, 16, 16, lcd_buf, 
-                                        g_uart3_ore_cnt > 0 ? RED : GREEN);
+                        /* 串口错误、CAN丢包和Jetson暂存区覆盖计数 */
+                        snprintf(lcd_buf, sizeof(lcd_buf), "O:%lu D:%lu J:%lu",
+                                g_uart3_ore_cnt, can_drop_count, jetson_stage_overwrite_count);
+                        lcd_safe_show_string(10, 270, 240, 16, 16, lcd_buf, 
+                                             (g_uart3_ore_cnt > 0 || can_drop_count > 0 || jetson_stage_overwrite_count > 0) ? RED : GREEN);
                     }
                     break;
 
@@ -524,11 +634,11 @@ void chassis_rx_task(void *pvParameters)
                         snprintf(lcd_buf, sizeof(lcd_buf), "FAULT: W%02X S%02X",
                                  state->fault_status.walk_fault,
                                  state->fault_status.steer_fault);
-                        lcd_show_string(10, 290, 240, 16, 16, lcd_buf, RED);
+                        lcd_safe_show_string(10, 290, 240, 16, 16, lcd_buf, RED);
                     }
                     else
                     {
-                        lcd_show_string(10, 290, 240, 16, 16, "FAULT: NONE         ", GREEN);
+                        lcd_safe_show_string(10, 290, 240, 16, 16, "FAULT: NONE         ", GREEN);
                     }
                     break;
 
@@ -553,11 +663,11 @@ void chassis_rx_task(void *pvParameters)
         /* 【移到 if 外面】无论有没有收到新包，每200ms都刷新一次在线状态 */
         if (chassis_is_online())
         {
-            lcd_show_string(10, 190, 220, 16, 16, "Status: ONLINE ", GREEN);
+            lcd_safe_show_string(10, 190, 220, 16, 16, "Status: ONLINE ", GREEN);
         }
         else
         {
-            lcd_show_string(10, 190, 220, 16, 16, "Status: OFFLINE", RED);
+            lcd_safe_show_string(10, 190, 220, 16, 16, "Status: OFFLINE", RED);
         }
     }
 }

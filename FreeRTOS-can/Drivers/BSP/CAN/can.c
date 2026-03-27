@@ -37,6 +37,7 @@ CAN_RxHeaderTypeDef g_canx_rxheader;    /* 接收参数句柄 */
 
 /* 全局队列句柄 */
 static QueueHandle_t g_can_rx_queue_handle = NULL;
+static volatile uint32_t g_can_rx_drop_count = 0;
 
 /**
  * @brief       CAN初始化
@@ -153,6 +154,16 @@ void can_set_rx_queue(void *queue_handle)
 }
 
 /**
+ * @brief       获取CAN接收队列丢包计数
+ * @param       无
+ * @retval      当前丢包累计次数
+ */
+uint32_t can_get_rx_drop_count(void)
+{
+    return g_can_rx_drop_count;
+}
+
+/**
  * @brief       CAN RX0 中断服务函数
  *   @note      处理CAN FIFO0的接收中断，数据入队列
  * @param       无
@@ -173,7 +184,10 @@ void CAN1_RX0_IRQHandler(void)
         /* 将数据入队到队列，在中断中必须使用 FromISR 版本！ */
         if (g_can_rx_queue_handle != NULL)
         {
-            xQueueSendFromISR(g_can_rx_queue_handle, &rx_data, &xHigherPriorityTaskWoken);
+            if (xQueueSendFromISR(g_can_rx_queue_handle, &rx_data, &xHigherPriorityTaskWoken) != pdTRUE)
+            {
+                g_can_rx_drop_count++;
+            }
         }
     }
 
@@ -233,6 +247,7 @@ uint8_t can_send_msg(uint32_t id, uint8_t *msg, uint8_t len)
  *   @arg       0   , 无数据被收到;
  *   @arg       其他, 接收的数据长度
  */
+#if !CAN_RX0_INT_ENABLE
 uint8_t can_receive_msg(uint32_t id, uint8_t *buf)
 {
     if (HAL_CAN_GetRxFifoFillLevel(&g_canx_handler, CAN_RX_FIFO0) == 0)     /* 没有接收到数据 */
@@ -251,5 +266,5 @@ uint8_t can_receive_msg(uint32_t id, uint8_t *buf)
     }
 
     return g_canx_rxheader.DLC;
-
 }
+#endif
